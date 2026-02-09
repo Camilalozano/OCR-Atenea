@@ -78,12 +78,18 @@ Extrae del siguiente texto (RUT DIAN) ÚNICAMENTE estos campos y devuelve SOLO J
 - primer_nombre
 - otros_nombres
 
-Reglas:
-- numero_identificacion corresponde al campo 26 "Número de Identificación" (NO es "Número de formulario" campo 4, NI el NIT campo 5).
-- Si un campo no aparece, pon null.
+REGLAS ESTRICTAS:
 - No inventes datos.
-- numero_identificacion debe quedar solo con dígitos (sin espacios).
-- Devuelve únicamente el JSON, sin explicación, sin markdown, sin ```.
+- El campo numero_identificacion DEBE corresponder al valor que aparece
+  JUNTO a "26. Número de Identificación".
+- NO usar:
+  - Número de formulario
+  - NIT
+  - Códigos de barras
+  - Números largos sin rótulo
+- Si hay duda, devuelve null.
+- Devuelve SOLO JSON válido, sin texto adicional.
+
 
 TEXTO:
 {text}
