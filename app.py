@@ -68,6 +68,32 @@ def corregir_numero_identificacion(data: dict, texto_pdf: str) -> dict:
         data["numero_identificacion"] = regla
     return data
 
+def validar_numero_identificacion(texto: str, candidato: str) -> str | None:
+    """
+    Valida que el número venga del campo 26 del RUT
+    """
+    if not candidato:
+        return None
+
+    # Solo dígitos
+    candidato = re.sub(r"\D", "", candidato)
+
+    # Regla básica: cédula = 8 a 10 dígitos (normalmente 10)
+    if not (8 <= len(candidato) <= 10):
+        return None
+
+    # Buscar patrón explícito en el texto
+    patron = re.compile(
+        r"26\.\s*Número de Identificación\s*[\n: ]+\s*(\d{8,10})"
+    )
+    match = patron.search(texto)
+
+    if match:
+        return match.group(1)
+
+    # Si no se encuentra el patrón, no confiamos
+    return None
+    
 def extract_rut_fields_raw(client: OpenAI, text: str) -> str:
     prompt = f"""
 Extrae del siguiente texto (RUT DIAN) ÚNICAMENTE estos campos y devuelve SOLO JSON válido:
@@ -157,7 +183,12 @@ if st.button("🚀 Procesar"):
     with st.spinner("🤖 Extrayendo campos con IA..."):
         raw = extract_rut_fields_raw(client, texto)
         data = normalizar_campos(safe_json_loads(raw))
-        data = corregir_numero_identificacion(data, texto)
+
+        numero_validado = validar_numero_identificacion(texto, data.get("numero_identificacion"))
+        if numero_validado:
+            data["numero_identificacion"] = numero_validado
+        else:
+            data["numero_identificacion"] = None
 
     st.success("✅ Extracción lista")
     df = pd.DataFrame([data])
