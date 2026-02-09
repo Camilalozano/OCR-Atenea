@@ -33,6 +33,41 @@ def extract_text_pymupdf(pdf_bytes: bytes) -> str:
         parts.append(page.get_text("text"))
     return "\n".join(parts).strip()
 
+def extraer_numero_identificacion_regla(texto: str) -> str | None:
+    """
+    Intenta extraer el campo 26. Número de Identificación (CC) del RUT.
+    Evita confundirlo con:
+      - 4. Número de formulario
+      - 5. NIT
+    """
+    t = " ".join(texto.split())  # normaliza espacios
+
+    # Caso ideal: aparece el rótulo exacto del campo 26
+    m = re.search(r"26\.\s*Número de Identificación\s*([0-9\s]{6,20})", t, re.IGNORECASE)
+    if m:
+        cand = re.sub(r"\D", "", m.group(1))
+        if 6 <= len(cand) <= 11:
+            return cand
+
+    # Fallback: a veces aparece cerca de “Cédula de Ciudadanía”
+    m = re.search(r"Cédula de Ciudadanía\s*([0-9\s]{6,20})", t, re.IGNORECASE)
+    if m:
+        cand = re.sub(r"\D", "", m.group(1))
+        if 6 <= len(cand) <= 11:
+            return cand
+
+    return None
+
+
+def corregir_numero_identificacion(data: dict, texto_pdf: str) -> dict:
+    """
+    Si la IA se equivoca, reemplaza numero_identificacion por el detectado en el PDF.
+    """
+    regla = extraer_numero_identificacion_regla(texto_pdf)
+    if regla:
+        data["numero_identificacion"] = regla
+    return data
+
 def extract_rut_fields_raw(client: OpenAI, text: str) -> str:
     prompt = f"""
 Extrae del siguiente texto (RUT DIAN) ÚNICAMENTE estos campos y devuelve SOLO JSON válido:
@@ -116,6 +151,7 @@ if st.button("🚀 Procesar"):
     with st.spinner("🤖 Extrayendo campos con IA..."):
         raw = extract_rut_fields_raw(client, texto)
         data = normalizar_campos(safe_json_loads(raw))
+        data = corregir_numero_identificacion(data, texto)
 
     st.success("✅ Extracción lista")
     df = pd.DataFrame([data])
