@@ -44,6 +44,7 @@ Extrae del siguiente texto (RUT DIAN) ÚNICAMENTE estos campos y devuelve SOLO J
 - otros_nombres
 
 Reglas:
+- numero_identificacion corresponde al campo 26 "Número de Identificación" (NO es "Número de formulario" campo 4, NI el NIT campo 5).
 - Si un campo no aparece, pon null.
 - No inventes datos.
 - numero_identificacion debe quedar solo con dígitos (sin espacios).
