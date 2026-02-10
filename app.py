@@ -7,7 +7,9 @@ import fitz  # PyMuPDF
 import pandas as pd
 import streamlit as st
 from openai import OpenAI
-
+import numpy as np
+from PIL import Image
+import easyocr
 
 # -------------------------
 # 💾 Utilidades
@@ -33,6 +35,73 @@ def extract_text_pymupdf(pdf_bytes: bytes) -> str:
         parts.append(page.get_text("text"))
     return "\n".join(parts).strip()
 
+@st.cache_resource
+def get_easyocr_reader():
+    # cache para no recargar modelo cada vez
+    return easyocr.Reader(["es"], gpu=False)
+
+def ocr_numero_identificacion_desde_campo26(pdf_bytes: bytes) -> str | None:
+    """
+    Busca en el PDF el texto 'Número de Identificación' y hace OCR SOLO en un recorte
+    cerca de ese campo para capturar la cédula correcta (8-10 dígitos).
+    """
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    reader = get_easyocr_reader()
+
+    # Frases a buscar (por si cambia el texto)
+    targets = ["Número de Identificación", "Numero de Identificacion"]
+
+    for page in doc:
+        rects = []
+        for t in targets:
+            rects += page.search_for(t)
+
+        if not rects:
+            continue
+
+        # Tomamos el primer match
+        r = rects[0]
+
+        # 👇 Recorte: normalmente el número está a la derecha o un poco abajo del label
+        # Ajusta estos márgenes si luego ves otro formato de RUT.
+        clip = fitz.Rect(
+            r.x0,                # inicio en el label
+            max(r.y0 - 20, 0),    # un poquito arriba
+            min(r.x1 + 350, page.rect.x1),  # bastante a la derecha
+            min(r.y1 + 80, page.rect.y1)    # y algo abajo
+        )
+
+        # Render del recorte como imagen (sin poppler)
+        pix = page.get_pixmap(clip=clip, dpi=300)
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+
+        # OCR
+        results = reader.readtext(np.array(img), detail=0)
+
+        # Extraer candidatos numéricos 8-10 dígitos
+        candidatos = []
+        for s in results:
+            dig = re.sub(r"\D", "", s)
+            if 8 <= len(dig) <= 10:
+                candidatos.append(dig)
+
+        if candidatos:
+            # Elegimos el más largo (normalmente 10)
+            candidatos.sort(key=len, reverse=True)
+            return candidatos[0]
+
+    return None
+
+def numero_id_es_sospechoso(num: str | None) -> bool:
+    if not num:
+        return True
+    num = re.sub(r"\D", "", str(num))
+    # cédula típica 8-10 dígitos, y en Colombia usualmente 10
+    if not (8 <= len(num) <= 10):
+        return True
+    # descarta números demasiado “largos” o raros (ya cubierto por len)
+    return False
+    
 def extraer_numero_identificacion_regla(texto: str) -> str | None:
     """
     Intenta extraer el campo 26. Número de Identificación (CC) del RUT.
@@ -183,6 +252,13 @@ if st.button("🚀 Procesar"):
     with st.spinner("🤖 Extrayendo campos con IA..."):
         raw = extract_rut_fields_raw(client, texto)
         data = normalizar_campos(safe_json_loads(raw))
+        
+        # ✅ Fallback OCR SOLO para numero_identificacion
+        if numero_id_es_sospechoso(data.get("numero_identificacion")):
+            id_ocr = ocr_numero_identificacion_desde_campo26(pdf_bytes)
+            if id_ocr:
+                data["numero_identificacion"] = id_ocr
+        
 
         numero_validado = validar_numero_identificacion(texto, data.get("numero_identificacion"))
         if numero_validado:
