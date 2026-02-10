@@ -537,10 +537,7 @@ if st.button("🚀 Procesar todo"):
     else:
         st.info("ℹ️ No cargaste Cédula. El Excel saldrá con DOC12 en blanco.")
 
-    # ✅ Reconciliar número del RUT usando la Cédula (cuando exista)
-    if rut_pdf and cc_pdf and rut_data and cc_data:
-        rut_data = reconciliar_numero_identificacion_rut_con_cc(rut_data, cc_data, rut_texto)
-
+    
     
     # ---- Consolidado diccionario maestro ----
     df_master = fill_master_values(rut_data, cc_data)
