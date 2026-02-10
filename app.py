@@ -113,55 +113,41 @@ def limpiar_texto_para_llm(text: str) -> str:
 # =========================
 def extraer_numero_identificacion_rut_desde_texto(text: str) -> str | None:
     """
-    Extrae el número de identificación del RUT.
-    Prioriza cuando el texto menciona Cédula de Ciudadanía / C.C.
-    Evita números largos y reduce falsos positivos de 11 dígitos.
+    Versión 'arreglada' (como la de la mañana): 
+    - Prioriza 26. Número de Identificación
+    - SOLO acepta 8-10 dígitos (evita falsos 11)
+    - Fallback: elige el mejor entre 8-10 (prefiere 10)
     """
     if not text:
         return None
 
     t = " ".join(text.split())
 
-    # 1) Anclaje fuerte por el campo 26
-    patrones_26 = [
+    # 1) Anclaje fuerte al campo 26
+    m = re.search(
         r"26\.\s*N[úu]mero\s+de\s+Identificaci[óo]n\s*[:\-]?\s*([0-9][0-9\.\s]{6,20})",
-    ]
-    for pat in patrones_26:
-        m = re.search(pat, t, flags=re.IGNORECASE)
-        if m:
-            cand = only_digits(m.group(1))
-            # aquí aceptamos 8-11 pero luego se reconciliará
-            if cand and 8 <= len(cand) <= 11:
-                return cand
+        t,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        cand = only_digits(m.group(1))
+        # ✅ SOLO 8-10
+        if cand and 8 <= len(cand) <= 10:
+            return cand
 
-    # 2) Si aparece CC, buscar cerca a esa etiqueta
-    patrones_cc = [
-        r"(C[ÉE]DULA\s+DE\s+CIUDADAN[ÍI]A|C\.?\s*C\.?)\s*[:\-]?\s*([0-9][0-9\.\s]{6,20})",
-        r"Tipo\s+de\s+documento\s*[:\-]?\s*C[ÉE]DULA\s+DE\s+CIUDADAN[ÍI]A.*?N[úu]mero.*?([0-9][0-9\.\s]{6,20})",
-    ]
-    for pat in patrones_cc:
-        m = re.search(pat, t, flags=re.IGNORECASE)
-        if m:
-            cand = only_digits(m.group(2) if m.lastindex and m.lastindex >= 2 else m.group(1))
-            if cand and 8 <= len(cand) <= 11:
-                return cand
-
-    # 3) Fallback: buscar todos los números 8-11 y escoger el mejor
+    # 2) Fallback: todos los números 8-10 y escoger el mejor (10 gana)
     nums = [only_digits(x) for x in re.findall(r"\d[\d\.\s]{6,20}", t)]
-    nums = [n for n in nums if n and 8 <= len(n) <= 11]
+    nums = [n for n in nums if n and 8 <= len(n) <= 10]
     if not nums:
         return None
 
     def score(n: str) -> int:
-        # ✅ preferimos 10 (CC típica), luego 9, luego 8, y 11 al final
         if len(n) == 10:
             return 100
         if len(n) == 9:
             return 80
         if len(n) == 8:
-            return 70
-        if len(n) == 11:
-            return 40  # antes le dabas 75 → causaba el error
+            return 60
         return 0
 
     nums = sorted(set(nums), key=score, reverse=True)
@@ -170,23 +156,23 @@ def extraer_numero_identificacion_rut_desde_texto(text: str) -> str | None:
 
 def validar_numero_identificacion_rut(rut_texto: str, candidate: str | None) -> str | None:
     """
-    Valida/corrige el numero_identificacion:
-    - Si candidate es 12+ dígitos => casi seguro es código de barras => reemplazar por anclado.
-    - Si candidate no aparece en el texto, intentar anclado.
-    - Si candidate está en rango 8-11 y aparece, se conserva.
+    Valida/corrige numero_identificacion:
+    - Descarta 11+ dígitos (códigos / consecutivos)
+    - SOLO permite 8-10
+    - Si candidate no aparece en texto, intenta extraer anclado por campo 26
     """
     cand = only_digits(candidate) if candidate else None
 
-    # Si no hay candidato, intentar por texto
+    # Si no hay candidato
     if not cand:
         return extraer_numero_identificacion_rut_desde_texto(rut_texto)
 
-    # Descarta números demasiado largos
-    if len(cand) >= 12:
+    # Descarta números largos (incluye 11)
+    if len(cand) >= 11:
         return extraer_numero_identificacion_rut_desde_texto(rut_texto)
 
-    # Rango típico de documento
-    if 8 <= len(cand) <= 11:
+    # Acepta solo 8-10
+    if 8 <= len(cand) <= 10:
         if rut_texto:
             t_digits = only_digits(" ".join(rut_texto.split())) or ""
             if cand not in t_digits:
@@ -194,10 +180,7 @@ def validar_numero_identificacion_rut(rut_texto: str, candidate: str | None) -> 
                 return anchored or cand
         return cand
 
-    # Si no cuadra, fallback al anclado
     return extraer_numero_identificacion_rut_desde_texto(rut_texto)
-
-
 # =========================
 # 📄 Extracción RUT (texto embebido)
 # =========================
