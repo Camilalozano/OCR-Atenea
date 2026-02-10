@@ -78,43 +78,55 @@ def normalize_date(x: str | None) -> str | None:
 # =========================
 def extraer_numero_identificacion_rut_desde_texto(text: str) -> str | None:
     """
-    Busca la cédula del RUT anclada a '26. Número de Identificación' (y variantes).
-    Evita tomar números largos (12+ dígitos) típicos de códigos de barras/formularios.
+    Extrae el número de identificación del RUT.
+    Prioriza cuando el texto menciona Cédula de Ciudadanía / C.C.
+    Evita números largos y reduce falsos positivos de 11 dígitos.
     """
     if not text:
         return None
 
     t = " ".join(text.split())
 
-    patrones = [
+    # 1) Anclaje fuerte por el campo 26
+    patrones_26 = [
         r"26\.\s*N[úu]mero\s+de\s+Identificaci[óo]n\s*[:\-]?\s*([0-9][0-9\.\s]{6,20})",
-        r"N[úu]mero\s+de\s+Identificaci[óo]n\s*[:\-]?\s*([0-9][0-9\.\s]{6,20})",
-        r"Tipo\s+de\s+documento\s*[:\-]?\s*[A-ZÁÉÍÓÚÑ ]+?\s+([0-9][0-9\.\s]{6,20})",
     ]
-
-    for pat in patrones:
+    for pat in patrones_26:
         m = re.search(pat, t, flags=re.IGNORECASE)
         if m:
             cand = only_digits(m.group(1))
+            # aquí aceptamos 8-11 pero luego se reconciliará
             if cand and 8 <= len(cand) <= 11:
                 return cand
 
-    # Fallback: escoger mejor candidato entre números razonables (8-11)
+    # 2) Si aparece CC, buscar cerca a esa etiqueta
+    patrones_cc = [
+        r"(C[ÉE]DULA\s+DE\s+CIUDADAN[ÍI]A|C\.?\s*C\.?)\s*[:\-]?\s*([0-9][0-9\.\s]{6,20})",
+        r"Tipo\s+de\s+documento\s*[:\-]?\s*C[ÉE]DULA\s+DE\s+CIUDADAN[ÍI]A.*?N[úu]mero.*?([0-9][0-9\.\s]{6,20})",
+    ]
+    for pat in patrones_cc:
+        m = re.search(pat, t, flags=re.IGNORECASE)
+        if m:
+            cand = only_digits(m.group(2) if m.lastindex and m.lastindex >= 2 else m.group(1))
+            if cand and 8 <= len(cand) <= 11:
+                return cand
+
+    # 3) Fallback: buscar todos los números 8-11 y escoger el mejor
     nums = [only_digits(x) for x in re.findall(r"\d[\d\.\s]{6,20}", t)]
     nums = [n for n in nums if n and 8 <= len(n) <= 11]
     if not nums:
         return None
 
     def score(n: str) -> int:
-        # Preferimos 10 (muy común CC), luego 9/11, luego 8
+        # ✅ preferimos 10 (CC típica), luego 9, luego 8, y 11 al final
         if len(n) == 10:
             return 100
         if len(n) == 9:
-            return 85
-        if len(n) == 11:
-            return 75
+            return 80
         if len(n) == 8:
-            return 60
+            return 70
+        if len(n) == 11:
+            return 40  # antes le dabas 75 → causaba el error
         return 0
 
     nums = sorted(set(nums), key=score, reverse=True)
@@ -190,6 +202,37 @@ TEXTO:
         temperature=0,
     )
     return resp.choices[0].message.content
+
+def reconciliar_numero_identificacion_rut_con_cc(rut_data: dict, cc_data: dict, rut_texto: str) -> dict:
+    """
+    Si hay conflicto entre RUT y Cédula, usa la Cédula como fuente de verdad
+    (especialmente cuando el tipo_documento del RUT es Cédula de Ciudadanía / C.C.).
+    """
+    if not rut_data or not cc_data:
+        return rut_data
+
+    rut_tipo = (rut_data.get("tipo_documento") or "").lower()
+    rut_num = only_digits(rut_data.get("numero_identificacion"))
+    cc_num = only_digits(cc_data.get("doc_numero"))
+
+    if not cc_num:
+        return rut_data
+
+    rut_text_digits = only_digits(" ".join((rut_texto or "").split())) or ""
+
+    # Condiciones para corregir:
+    # - El RUT dice CC / C.C. (o está vacío)
+    # - O el número del RUT es 11 dígitos (sospechoso)
+    # - O el número del RUT es distinto al de la cédula
+    # - O el número de cédula sí aparece en el texto del RUT
+    tipo_es_cc = ("cédula" in rut_tipo) or ("cedula" in rut_tipo) or ("c.c" in rut_tipo) or (rut_tipo.strip() == "")
+    rut_sospechoso = (rut_num is None) or (len(rut_num) == 11)
+    cc_aparece_en_rut = (cc_num in rut_text_digits)
+
+    if tipo_es_cc and (rut_sospechoso or rut_num != cc_num or cc_aparece_en_rut):
+        rut_data["numero_identificacion"] = cc_num
+
+    return rut_data
 
 
 def normalizar_campos_rut(data: dict, rut_texto: str = "") -> dict:
@@ -474,6 +517,11 @@ if st.button("🚀 Procesar todo"):
     else:
         st.info("ℹ️ No cargaste Cédula. El Excel saldrá con DOC12 en blanco.")
 
+    # ✅ Reconciliar número del RUT usando la Cédula (cuando exista)
+    if rut_pdf and cc_pdf and rut_data and cc_data:
+        rut_data = reconciliar_numero_identificacion_rut_con_cc(rut_data, cc_data, rut_texto)
+
+    
     # ---- Consolidado diccionario maestro ----
     df_master = fill_master_values(rut_data, cc_data)
     st.subheader("📌 Consolidado (Diccionario maestro)")
