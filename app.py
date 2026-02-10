@@ -113,17 +113,16 @@ def limpiar_texto_para_llm(text: str) -> str:
 # =========================
 def extraer_numero_identificacion_rut_desde_texto(text: str) -> str | None:
     """
-    Versión 'arreglada' (como la de la mañana): 
+    Versión robusta:
     - Prioriza 26. Número de Identificación
-    - SOLO acepta 8-10 dígitos (evita falsos 11)
-    - Fallback: elige el mejor entre 8-10 (prefiere 10)
+    - SOLO acepta 8-10 dígitos (evita falsos positivos típicos)
     """
     if not text:
         return None
 
     t = " ".join(text.split())
 
-    # 1) Anclaje fuerte al campo 26
+    # Anclaje fuerte al campo 26
     m = re.search(
         r"26\.\s*N[úu]mero\s+de\s+Identificaci[óo]n\s*[:\-]?\s*([0-9][0-9\.\s]{6,20})",
         t,
@@ -131,11 +130,10 @@ def extraer_numero_identificacion_rut_desde_texto(text: str) -> str | None:
     )
     if m:
         cand = only_digits(m.group(1))
-        # ✅ SOLO 8-10
         if cand and 8 <= len(cand) <= 10:
             return cand
 
-    # 2) Fallback: todos los números 8-10 y escoger el mejor (10 gana)
+    # Fallback: elegir mejor candidato 8-10 (10 gana)
     nums = [only_digits(x) for x in re.findall(r"\d[\d\.\s]{6,20}", t)]
     nums = [n for n in nums if n and 8 <= len(n) <= 10]
     if not nums:
@@ -151,27 +149,22 @@ def extraer_numero_identificacion_rut_desde_texto(text: str) -> str | None:
         return 0
 
     nums = sorted(set(nums), key=score, reverse=True)
-    return nums[0] if nums else None
-
-
+    return nums[0]
+    
 def validar_numero_identificacion_rut(rut_texto: str, candidate: str | None) -> str | None:
     """
-    Valida/corrige numero_identificacion:
     - Descarta 11+ dígitos (códigos / consecutivos)
     - SOLO permite 8-10
-    - Si candidate no aparece en texto, intenta extraer anclado por campo 26
+    - Si candidate no aparece en texto, intenta anclaje al campo 26
     """
     cand = only_digits(candidate) if candidate else None
 
-    # Si no hay candidato
     if not cand:
         return extraer_numero_identificacion_rut_desde_texto(rut_texto)
 
-    # Descarta números largos (incluye 11)
     if len(cand) >= 11:
         return extraer_numero_identificacion_rut_desde_texto(rut_texto)
 
-    # Acepta solo 8-10
     if 8 <= len(cand) <= 10:
         if rut_texto:
             t_digits = only_digits(" ".join(rut_texto.split())) or ""
@@ -181,6 +174,7 @@ def validar_numero_identificacion_rut(rut_texto: str, candidate: str | None) -> 
         return cand
 
     return extraer_numero_identificacion_rut_desde_texto(rut_texto)
+    
 # =========================
 # 📄 Extracción RUT (texto embebido)
 # =========================
@@ -223,8 +217,7 @@ TEXTO:
 
 def reconciliar_numero_identificacion_rut_con_cc(rut_data: dict, cc_data: dict, rut_texto: str) -> dict:
     """
-    Si hay conflicto entre RUT y Cédula, usa la Cédula como fuente de verdad
-    (especialmente cuando el tipo_documento del RUT es Cédula de Ciudadanía / C.C.).
+    Si hay conflicto entre RUT y Cédula, usa la Cédula como fuente de verdad.
     """
     if not rut_data or not cc_data:
         return rut_data
@@ -238,20 +231,24 @@ def reconciliar_numero_identificacion_rut_con_cc(rut_data: dict, cc_data: dict, 
 
     rut_text_digits = only_digits(" ".join((rut_texto or "").split())) or ""
 
-    # Condiciones para corregir:
-    # - El RUT dice CC / C.C. (o está vacío)
-    # - O el número del RUT es 11 dígitos (sospechoso)
-    # - O el número del RUT es distinto al de la cédula
-    # - O el número de cédula sí aparece en el texto del RUT
-    tipo_es_cc = ("cédula" in rut_tipo) or ("cedula" in rut_tipo) or ("c.c" in rut_tipo) or (rut_tipo.strip() == "")
-    rut_sospechoso = (rut_num is None) or (len(rut_num) == 11)
-    cc_aparece_en_rut = (cc_num in rut_text_digits)
+    # ¿El tipo del RUT es CC?
+    tipo_es_cc = (
+        ("cédula" in rut_tipo)
+        or ("cedula" in rut_tipo)
+        or ("c.c" in rut_tipo)
+        or (rut_tipo.strip() == "")
+    )
 
-    if tipo_es_cc and (rut_sospechoso or rut_num != cc_num or cc_aparece_en_rut):
+    # Sospechoso si no hay número, si es 11+ dígitos, o si no coincide con la cédula
+    rut_sospechoso = (rut_num is None) or (len(rut_num) >= 11) or (rut_num != cc_num)
+
+    # Si la cédula aparece en el texto del RUT, es una señal fuerte
+    cc_aparece_en_rut = cc_num in rut_text_digits
+
+    if tipo_es_cc and (rut_sospechoso or cc_aparece_en_rut):
         rut_data["numero_identificacion"] = cc_num
 
     return rut_data
-
 
 def normalizar_campos_rut(data: dict, rut_texto: str = "") -> dict:
     """
