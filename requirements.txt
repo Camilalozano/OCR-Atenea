@@ -3,3 +3,8 @@ openai
 pandas
 openpyxl
 pymupdf
+easyocr
+torch
+torchvision
+numpy
+pillow
