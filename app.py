@@ -21,17 +21,20 @@ def safe_json_loads(raw: str) -> dict:
     raw = re.sub(r"\s*```$", "", raw)
     return json.loads(raw)
 
+
 def only_digits(x: str | None) -> str | None:
     if x is None:
         return None
     d = re.sub(r"\D", "", str(x))
     return d if d else None
 
+
 def normalize_text(x: str | None) -> str | None:
     if x is None:
         return None
     x = str(x).strip()
     return x if x else None
+
 
 def normalize_date(x: str | None) -> str | None:
     """
@@ -52,17 +55,100 @@ def normalize_date(x: str | None) -> str | None:
         dd = int(m.group(1))
         mon = m.group(2)
         yyyy = int(m.group(3))
-        months = {"JAN":1,"FEB":2,"MAR":3,"APR":4,"MAY":5,"JUN":6,"JUL":7,"AUG":8,"SEP":9,"OCT":10,"NOV":11,"DEC":12}
+        months = {
+            "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+            "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12
+        }
         if mon in months:
             return f"{yyyy:04d}-{months[mon]:02d}-{dd:02d}"
 
     # dd-mm-yyyy
     m = re.search(r"(\d{1,2})[-/](\d{1,2})[-/](\d{4})", x)
     if m:
-        dd = int(m.group(1)); mm = int(m.group(2)); yyyy = int(m.group(3))
+        dd = int(m.group(1))
+        mm = int(m.group(2))
+        yyyy = int(m.group(3))
         return f"{yyyy:04d}-{mm:02d}-{dd:02d}"
 
     return x  # fallback
+
+
+# =========================
+# ✅ Mejora RUT: anti-código-de-barras (numero_identificacion)
+# =========================
+def extraer_numero_identificacion_rut_desde_texto(text: str) -> str | None:
+    """
+    Busca la cédula del RUT anclada a '26. Número de Identificación' (y variantes).
+    Evita tomar números largos (12+ dígitos) típicos de códigos de barras/formularios.
+    """
+    if not text:
+        return None
+
+    t = " ".join(text.split())
+
+    patrones = [
+        r"26\.\s*N[úu]mero\s+de\s+Identificaci[óo]n\s*[:\-]?\s*([0-9][0-9\.\s]{6,20})",
+        r"N[úu]mero\s+de\s+Identificaci[óo]n\s*[:\-]?\s*([0-9][0-9\.\s]{6,20})",
+        r"Tipo\s+de\s+documento\s*[:\-]?\s*[A-ZÁÉÍÓÚÑ ]+?\s+([0-9][0-9\.\s]{6,20})",
+    ]
+
+    for pat in patrones:
+        m = re.search(pat, t, flags=re.IGNORECASE)
+        if m:
+            cand = only_digits(m.group(1))
+            if cand and 8 <= len(cand) <= 11:
+                return cand
+
+    # Fallback: escoger mejor candidato entre números razonables (8-11)
+    nums = [only_digits(x) for x in re.findall(r"\d[\d\.\s]{6,20}", t)]
+    nums = [n for n in nums if n and 8 <= len(n) <= 11]
+    if not nums:
+        return None
+
+    def score(n: str) -> int:
+        # Preferimos 10 (muy común CC), luego 9/11, luego 8
+        if len(n) == 10:
+            return 100
+        if len(n) == 9:
+            return 85
+        if len(n) == 11:
+            return 75
+        if len(n) == 8:
+            return 60
+        return 0
+
+    nums = sorted(set(nums), key=score, reverse=True)
+    return nums[0] if nums else None
+
+
+def validar_numero_identificacion_rut(rut_texto: str, candidate: str | None) -> str | None:
+    """
+    Valida/corrige el numero_identificacion:
+    - Si candidate es 12+ dígitos => casi seguro es código de barras => reemplazar por anclado.
+    - Si candidate no aparece en el texto, intentar anclado.
+    - Si candidate está en rango 8-11 y aparece, se conserva.
+    """
+    cand = only_digits(candidate) if candidate else None
+
+    # Si no hay candidato, intentar por texto
+    if not cand:
+        return extraer_numero_identificacion_rut_desde_texto(rut_texto)
+
+    # Descarta números demasiado largos
+    if len(cand) >= 12:
+        return extraer_numero_identificacion_rut_desde_texto(rut_texto)
+
+    # Rango típico de documento
+    if 8 <= len(cand) <= 11:
+        if rut_texto:
+            t_digits = only_digits(" ".join(rut_texto.split())) or ""
+            if cand not in t_digits:
+                anchored = extraer_numero_identificacion_rut_desde_texto(rut_texto)
+                return anchored or cand
+        return cand
+
+    # Si no cuadra, fallback al anclado
+    return extraer_numero_identificacion_rut_desde_texto(rut_texto)
 
 
 # =========================
@@ -74,6 +160,7 @@ def extract_text_pymupdf(pdf_bytes: bytes) -> str:
     for page in doc:
         parts.append(page.get_text("text"))
     return "\n".join(parts).strip()
+
 
 def extract_rut_fields_raw(client: OpenAI, text: str) -> str:
     prompt = f"""
@@ -97,18 +184,29 @@ TEXTO:
     resp = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
-            {"role":"system","content":"Devuelve SOLO JSON válido. Sin markdown."},
-            {"role":"user","content": prompt}
+            {"role": "system", "content": "Devuelve SOLO JSON válido. Sin markdown."},
+            {"role": "user", "content": prompt},
         ],
-        temperature=0
+        temperature=0,
     )
     return resp.choices[0].message.content
 
-def normalizar_campos_rut(data: dict) -> dict:
+
+def normalizar_campos_rut(data: dict, rut_texto: str = "") -> dict:
+    """
+    Normaliza salida del LLM + aplica validación anti-código-de-barras para numero_identificacion.
+    """
     data = data or {}
-    data["numero_identificacion"] = only_digits(data.get("numero_identificacion"))
-    for k in ["primer_apellido","segundo_apellido","primer_nombre","otros_nombres","tipo_documento"]:
+
+    # ✅ FIX clave: no confiar solo en only_digits. Validar con el texto del RUT.
+    data["numero_identificacion"] = validar_numero_identificacion_rut(
+        rut_texto=rut_texto,
+        candidate=data.get("numero_identificacion"),
+    )
+
+    for k in ["primer_apellido", "segundo_apellido", "primer_nombre", "otros_nombres", "tipo_documento"]:
         data[k] = normalize_text(data.get(k))
+
     return data
 
 
@@ -118,6 +216,7 @@ def normalizar_campos_rut(data: dict) -> dict:
 @st.cache_resource
 def get_ocr_reader():
     return easyocr.Reader(["es"], gpu=False)
+
 
 def pdf_to_images_pymupdf(pdf_bytes: bytes, zoom: float = 2.5) -> list[Image.Image]:
     """
@@ -133,6 +232,7 @@ def pdf_to_images_pymupdf(pdf_bytes: bytes, zoom: float = 2.5) -> list[Image.Ima
         images.append(img)
     return images
 
+
 def ocr_images_easyocr(images: list[Image.Image]) -> str:
     reader = get_ocr_reader()
     all_lines = []
@@ -142,10 +242,10 @@ def ocr_images_easyocr(images: list[Image.Image]) -> str:
         all_lines.extend(lines)
     return "\n".join([l for l in all_lines if l and str(l).strip()]).strip()
 
+
 def extract_cc_fields_raw(client: OpenAI, ocr_text: str) -> str:
     prompt = f"""
 A partir del texto OCR de una CÉDULA DE CIUDADANÍA de Colombia, extrae SOLO estos campos y devuelve SOLO JSON válido:
-
 - doc_pais_emisor
 - doc_tipo_documento
 - doc_numero
@@ -168,7 +268,7 @@ Reglas:
 - No inventes datos.
 - doc_numero debe quedar solo con dígitos (sin puntos ni espacios).
 - doc_estatura en metros (ej: 1.57) si aparece.
-- doc_huella_indice y doc_firma_titular deben ser "Sí" o "No" si puedes inferirlo por palabras como INDICE/HUELLA o FIRMA; si no, null.
+- doc_huella_indice y doc_firma_titular deben ser "Sí" o "No" si puedes inferirlo por palabras como INDICE/HUELLA/FIRMA.
 - Devuelve únicamente JSON, sin explicación, sin markdown.
 
 TEXTO_OCR:
@@ -177,16 +277,16 @@ TEXTO_OCR:
     resp = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
-            {"role":"system","content":"Devuelve SOLO JSON válido. Sin markdown."},
-            {"role":"user","content": prompt}
+            {"role": "system", "content": "Devuelve SOLO JSON válido. Sin markdown."},
+            {"role": "user", "content": prompt},
         ],
-        temperature=0
+        temperature=0,
     )
     return resp.choices[0].message.content
 
+
 def normalizar_campos_cc(data: dict) -> dict:
     data = data or {}
-
     data["doc_pais_emisor"] = normalize_text(data.get("doc_pais_emisor"))
     data["doc_tipo_documento"] = normalize_text(data.get("doc_tipo_documento"))
     data["doc_numero"] = only_digits(data.get("doc_numero"))
@@ -214,7 +314,6 @@ def normalizar_campos_cc(data: dict) -> dict:
 
     data["doc_huella_indice"] = norm_si_no(data.get("doc_huella_indice"))
     data["doc_firma_titular"] = norm_si_no(data.get("doc_firma_titular"))
-
     return data
 
 
@@ -223,32 +322,56 @@ def normalizar_campos_cc(data: dict) -> dict:
 # =========================
 MASTER_ROWS = [
     # ---------- DOC14 (RUT) ----------
-    {"doc_id":"DOC14","Fuente":"DOC14_RUT_DIAN","Caracterización variable":"Identificación personal","Nombre de la Variable":"tipo_documento","Tipo_Variable":"texto","Caracterización":"Tipo documento","Valor":None},
-    {"doc_id":"DOC14","Fuente":"DOC14_RUT_DIAN","Caracterización variable":"Identificación personal","Nombre de la Variable":"numero_identificacion","Tipo_Variable":"texto","Caracterización":"Número de identificación","Valor":None},
-    {"doc_id":"DOC14","Fuente":"DOC14_RUT_DIAN","Caracterización variable":"Identificación personal","Nombre de la Variable":"primer_apellido","Tipo_Variable":"texto","Caracterización":"Primer apellido","Valor":None},
-    {"doc_id":"DOC14","Fuente":"DOC14_RUT_DIAN","Caracterización variable":"Identificación personal","Nombre de la Variable":"segundo_apellido","Tipo_Variable":"texto","Caracterización":"Segundo apellido","Valor":None},
-    {"doc_id":"DOC14","Fuente":"DOC14_RUT_DIAN","Caracterización variable":"Identificación personal","Nombre de la Variable":"primer_nombre","Tipo_Variable":"texto","Caracterización":"Primer nombre","Valor":None},
-    {"doc_id":"DOC14","Fuente":"DOC14_RUT_DIAN","Caracterización variable":"Identificación personal","Nombre de la Variable":"otros_nombres","Tipo_Variable":"texto","Caracterización":"Otros nombres","Valor":None},
+    {"doc_id": "DOC14", "Fuente": "DOC14_RUT_DIAN", "Caracterización variable": "Identificación personal",
+     "Nombre de la Variable": "tipo_documento", "Tipo_Variable": "texto", "Caracterización": "Tipo documento"},
+    {"doc_id": "DOC14", "Fuente": "DOC14_RUT_DIAN", "Caracterización variable": "Identificación personal",
+     "Nombre de la Variable": "numero_identificacion", "Tipo_Variable": "texto", "Caracterización": "Número de identificación"},
+    {"doc_id": "DOC14", "Fuente": "DOC14_RUT_DIAN", "Caracterización variable": "Identificación personal",
+     "Nombre de la Variable": "primer_apellido", "Tipo_Variable": "texto", "Caracterización": "Primer apellido"},
+    {"doc_id": "DOC14", "Fuente": "DOC14_RUT_DIAN", "Caracterización variable": "Identificación personal",
+     "Nombre de la Variable": "segundo_apellido", "Tipo_Variable": "texto", "Caracterización": "Segundo apellido"},
+    {"doc_id": "DOC14", "Fuente": "DOC14_RUT_DIAN", "Caracterización variable": "Identificación personal",
+     "Nombre de la Variable": "primer_nombre", "Tipo_Variable": "texto", "Caracterización": "Primer nombre"},
+    {"doc_id": "DOC14", "Fuente": "DOC14_RUT_DIAN", "Caracterización variable": "Identificación personal",
+     "Nombre de la Variable": "otros_nombres", "Tipo_Variable": "texto", "Caracterización": "Otros nombres"},
 
     # ---------- DOC12 (Cédula) ----------
-    {"doc_id":"DOC12","Fuente":"DOC12_DocumentoIdentificacion","Caracterización variable":"Identificación del documento","Nombre de la Variable":"doc_tipo","Tipo_Variable":"texto","Caracterización":"Documento de identidad (Cédula de ciudadanía) – imagen anverso/reverso","Valor":None},
-    {"doc_id":"DOC12","Fuente":"DOC12_DocumentoIdentificacion","Caracterización variable":"Datos del documento","Nombre de la Variable":"doc_pais_emisor","Tipo_Variable":"texto","Caracterización":"País emisor (p.ej., República de Colombia)","Valor":None},
-    {"doc_id":"DOC12","Fuente":"DOC12_DocumentoIdentificacion","Caracterización variable":"Datos del documento","Nombre de la Variable":"doc_tipo_documento","Tipo_Variable":"texto","Caracterización":"Tipo documento (Cédula de ciudadanía)","Valor":None},
-    {"doc_id":"DOC12","Fuente":"DOC12_DocumentoIdentificacion","Caracterización variable":"Datos del documento","Nombre de la Variable":"doc_numero","Tipo_Variable":"texto","Caracterización":"Número de identificación","Valor":None},
-    {"doc_id":"DOC12","Fuente":"DOC12_DocumentoIdentificacion","Caracterización variable":"Datos del documento","Nombre de la Variable":"doc_apellidos","Tipo_Variable":"texto","Caracterización":"Apellidos","Valor":None},
-    {"doc_id":"DOC12","Fuente":"DOC12_DocumentoIdentificacion","Caracterización variable":"Datos del documento","Nombre de la Variable":"doc_nombres","Tipo_Variable":"texto","Caracterización":"Nombres","Valor":None},
-    {"doc_id":"DOC12","Fuente":"DOC12_DocumentoIdentificacion","Caracterización variable":"Datos del documento","Nombre de la Variable":"doc_fecha_nacimiento","Tipo_Variable":"fecha","Caracterización":"Fecha de nacimiento","Valor":None},
-    {"doc_id":"DOC12","Fuente":"DOC12_DocumentoIdentificacion","Caracterización variable":"Datos del documento","Nombre de la Variable":"doc_lugar_nacimiento","Tipo_Variable":"texto","Caracterización":"Lugar de nacimiento (ciudad/depto)","Valor":None},
-    {"doc_id":"DOC12","Fuente":"DOC12_DocumentoIdentificacion","Caracterización variable":"Datos del documento","Nombre de la Variable":"doc_sexo","Tipo_Variable":"texto","Caracterización":"Sexo (M/F)","Valor":None},
-    {"doc_id":"DOC12","Fuente":"DOC12_DocumentoIdentificacion","Caracterización variable":"Datos del documento","Nombre de la Variable":"doc_estatura","Tipo_Variable":"numero","Caracterización":"Estatura (m)","Valor":None},
-    {"doc_id":"DOC12","Fuente":"DOC12_DocumentoIdentificacion","Caracterización variable":"Datos del documento","Nombre de la Variable":"doc_grupo_sanguineo_rh","Tipo_Variable":"texto","Caracterización":"Grupo sanguíneo y RH (p.ej., A+)","Valor":None},
-    {"doc_id":"DOC12","Fuente":"DOC12_DocumentoIdentificacion","Caracterización variable":"Datos del documento","Nombre de la Variable":"doc_fecha_expedicion","Tipo_Variable":"fecha","Caracterización":"Fecha de expedición","Valor":None},
-    {"doc_id":"DOC12","Fuente":"DOC12_DocumentoIdentificacion","Caracterización variable":"Datos del documento","Nombre de la Variable":"doc_lugar_expedicion","Tipo_Variable":"texto","Caracterización":"Lugar de expedición","Valor":None},
-    {"doc_id":"DOC12","Fuente":"DOC12_DocumentoIdentificacion","Caracterización variable":"Datos del documento","Nombre de la Variable":"doc_registrador","Tipo_Variable":"texto","Caracterización":"Nombre registrador nacional (si aparece)","Valor":None},
-    {"doc_id":"DOC12","Fuente":"DOC12_DocumentoIdentificacion","Caracterización variable":"Datos del documento","Nombre de la Variable":"doc_codigo_barras","Tipo_Variable":"texto","Caracterización":"Cadena/código (MRZ o código de barras si se lee)","Valor":None},
-    {"doc_id":"DOC12","Fuente":"DOC12_DocumentoIdentificacion","Caracterización variable":"Biométricos (opcional)","Nombre de la Variable":"doc_huella_indice","Tipo_Variable":"booleano","Caracterización":"Presencia de huella (Sí/No)","Valor":None},
-    {"doc_id":"DOC12","Fuente":"DOC12_DocumentoIdentificacion","Caracterización variable":"Firma (opcional)","Nombre de la Variable":"doc_firma_titular","Tipo_Variable":"booleano","Caracterización":"Presencia de firma titular (Sí/No)","Valor":None},
+    {"doc_id": "DOC12", "Fuente": "DOC12_DocumentoIdentificacion", "Caracterización variable": "Identificación del documento",
+     "Nombre de la Variable": "doc_tipo", "Tipo_Variable": "texto", "Caracterización": "Tipo (diccionario)"},
+    {"doc_id": "DOC12", "Fuente": "DOC12_DocumentoIdentificacion", "Caracterización variable": "Datos del documento",
+     "Nombre de la Variable": "doc_pais_emisor", "Tipo_Variable": "texto", "Caracterización": "País emisor"},
+    {"doc_id": "DOC12", "Fuente": "DOC12_DocumentoIdentificacion", "Caracterización variable": "Datos del documento",
+     "Nombre de la Variable": "doc_tipo_documento", "Tipo_Variable": "texto", "Caracterización": "Tipo documento"},
+    {"doc_id": "DOC12", "Fuente": "DOC12_DocumentoIdentificacion", "Caracterización variable": "Datos del documento",
+     "Nombre de la Variable": "doc_numero", "Tipo_Variable": "texto", "Caracterización": "Número"},
+    {"doc_id": "DOC12", "Fuente": "DOC12_DocumentoIdentificacion", "Caracterización variable": "Datos del documento",
+     "Nombre de la Variable": "doc_apellidos", "Tipo_Variable": "texto", "Caracterización": "Apellidos"},
+    {"doc_id": "DOC12", "Fuente": "DOC12_DocumentoIdentificacion", "Caracterización variable": "Datos del documento",
+     "Nombre de la Variable": "doc_nombres", "Tipo_Variable": "texto", "Caracterización": "Nombres"},
+    {"doc_id": "DOC12", "Fuente": "DOC12_DocumentoIdentificacion", "Caracterización variable": "Datos del documento",
+     "Nombre de la Variable": "doc_fecha_nacimiento", "Tipo_Variable": "fecha", "Caracterización": "Fecha de nacimiento"},
+    {"doc_id": "DOC12", "Fuente": "DOC12_DocumentoIdentificacion", "Caracterización variable": "Datos del documento",
+     "Nombre de la Variable": "doc_lugar_nacimiento", "Tipo_Variable": "texto", "Caracterización": "Lugar de nacimiento"},
+    {"doc_id": "DOC12", "Fuente": "DOC12_DocumentoIdentificacion", "Caracterización variable": "Datos del documento",
+     "Nombre de la Variable": "doc_sexo", "Tipo_Variable": "texto", "Caracterización": "Sexo"},
+    {"doc_id": "DOC12", "Fuente": "DOC12_DocumentoIdentificacion", "Caracterización variable": "Datos del documento",
+     "Nombre de la Variable": "doc_estatura", "Tipo_Variable": "texto", "Caracterización": "Estatura"},
+    {"doc_id": "DOC12", "Fuente": "DOC12_DocumentoIdentificacion", "Caracterización variable": "Datos del documento",
+     "Nombre de la Variable": "doc_grupo_sanguineo_rh", "Tipo_Variable": "texto", "Caracterización": "Grupo sanguíneo y RH"},
+    {"doc_id": "DOC12", "Fuente": "DOC12_DocumentoIdentificacion", "Caracterización variable": "Datos del documento",
+     "Nombre de la Variable": "doc_fecha_expedicion", "Tipo_Variable": "fecha", "Caracterización": "Fecha de expedición"},
+    {"doc_id": "DOC12", "Fuente": "DOC12_DocumentoIdentificacion", "Caracterización variable": "Datos del documento",
+     "Nombre de la Variable": "doc_lugar_expedicion", "Tipo_Variable": "texto", "Caracterización": "Lugar de expedición"},
+    {"doc_id": "DOC12", "Fuente": "DOC12_DocumentoIdentificacion", "Caracterización variable": "Datos del documento",
+     "Nombre de la Variable": "doc_registrador", "Tipo_Variable": "texto", "Caracterización": "Registrador"},
+    {"doc_id": "DOC12", "Fuente": "DOC12_DocumentoIdentificacion", "Caracterización variable": "Datos del documento",
+     "Nombre de la Variable": "doc_codigo_barras", "Tipo_Variable": "texto", "Caracterización": "Código de barras"},
+    {"doc_id": "DOC12", "Fuente": "DOC12_DocumentoIdentificacion", "Caracterización variable": "Biométricos (opcional)",
+     "Nombre de la Variable": "doc_huella_indice", "Tipo_Variable": "texto", "Caracterización": "Huella índice"},
+    {"doc_id": "DOC12", "Fuente": "DOC12_DocumentoIdentificacion", "Caracterización variable": "Firma (opcional)",
+     "Nombre de la Variable": "doc_firma_titular", "Tipo_Variable": "texto", "Caracterización": "Firma titular"},
 ]
+
 
 def fill_master_values(rut_data: dict | None, cc_data: dict | None) -> pd.DataFrame:
     rows = [r.copy() for r in MASTER_ROWS]
@@ -262,7 +385,6 @@ def fill_master_values(rut_data: dict | None, cc_data: dict | None) -> pd.DataFr
 
     # Cédula
     if cc_data:
-        # campos constantes según tu diccionario
         cc_data = cc_data.copy()
         cc_data.setdefault("doc_pais_emisor", "República de Colombia")
         cc_data.setdefault("doc_tipo_documento", "Cédula de ciudadanía")
@@ -276,6 +398,7 @@ def fill_master_values(rut_data: dict | None, cc_data: dict | None) -> pd.DataFr
                     r["Valor"] = cc_data.get(key)
 
     return pd.DataFrame(rows)
+
 
 def dataframe_to_excel_bytes(df: pd.DataFrame) -> bytes:
     output = io.BytesIO()
@@ -312,7 +435,6 @@ if st.button("🚀 Procesar todo"):
         st.stop()
 
     client = OpenAI(api_key=api_key)
-
     rut_data = None
     cc_data = None
 
@@ -326,7 +448,7 @@ if st.button("🚀 Procesar todo"):
         else:
             with st.spinner("🤖 RUT: extrayendo campos con IA..."):
                 raw = extract_rut_fields_raw(client, rut_texto)
-                rut_data = normalizar_campos_rut(safe_json_loads(raw))
+                rut_data = normalizar_campos_rut(safe_json_loads(raw), rut_texto=rut_texto)
 
             st.success("✅ RUT listo")
             st.dataframe(pd.DataFrame([rut_data]), use_container_width=True)
@@ -336,6 +458,7 @@ if st.button("🚀 Procesar todo"):
     # ---- CÉDULA ----
     if cc_pdf:
         cc_bytes = cc_pdf.read()
+
         with st.spinner("🪪 Cédula: renderizando PDF a imágenes..."):
             images = pdf_to_images_pymupdf(cc_bytes, zoom=2.5)
 
@@ -361,5 +484,5 @@ if st.button("🚀 Procesar todo"):
         "⬇️ Descargar Excel consolidado (diccionario_maestro.xlsx)",
         data=excel_bytes,
         file_name="diccionario_maestro.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
