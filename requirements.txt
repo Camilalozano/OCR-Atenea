@@ -4,7 +4,8 @@ pandas
 openpyxl
 pymupdf
 easyocr
-torch
-torchvision
 numpy
 pillow
+opencv-python-headless
+torch
+torchvision
