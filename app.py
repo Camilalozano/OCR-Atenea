@@ -254,17 +254,23 @@ if st.button("🚀 Procesar"):
         data = normalizar_campos(safe_json_loads(raw))
         
         # ✅ Fallback OCR SOLO para numero_identificacion
+        id_ocr = None
+        
         if numero_id_es_sospechoso(data.get("numero_identificacion")):
             id_ocr = ocr_numero_identificacion_desde_campo26(pdf_bytes)
             if id_ocr:
                 data["numero_identificacion"] = id_ocr
         
 
-        numero_validado = validar_numero_identificacion(texto, data.get("numero_identificacion"))
-        if numero_validado:
-            data["numero_identificacion"] = numero_validado
-        else:
-            data["numero_identificacion"] = None
+        # 🔎 Validar SOLO si NO hubo OCR exitoso (porque el PDF puede traer texto “malo”)
+        if not id_ocr:
+            numero_validado = validar_numero_identificacion(texto, data.get("numero_identificacion"))
+            if numero_validado:
+                data["numero_identificacion"] = numero_validado
+            else:
+                st.warning("⚠️ No pude validar el número en el texto del PDF. Dejo el valor extraído (IA).")
+                # 👈 NO lo borres; lo dejamos tal cual
+
 
     st.success("✅ Extracción lista")
     df = pd.DataFrame([data])
