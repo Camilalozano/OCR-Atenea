@@ -72,7 +72,42 @@ def normalize_date(x: str | None) -> str | None:
 
     return x  # fallback
 
+import unicodedata
 
+def limpiar_texto_para_llm(text: str) -> str:
+    """
+    Limpia texto extraído de PDF para evitar UnicodeEncodeError:
+    - Normaliza Unicode
+    - Elimina caracteres de control e invisibles
+    - Reemplaza espacios raros por espacios normales
+    """
+    if not text:
+        return ""
+
+    # Normaliza (quita rarezas tipo ligaduras)
+    t = unicodedata.normalize("NFKC", text)
+
+    # Reemplazar espacios raros
+    t = t.replace("\u00A0", " ")  # non-breaking space
+    t = t.replace("\u200B", "")   # zero-width space
+    t = t.replace("\u200E", "")   # LRM
+    t = t.replace("\u200F", "")   # RLM
+
+    # Eliminar caracteres de control (excepto saltos de línea y tab)
+    cleaned = []
+    for ch in t:
+        cat = unicodedata.category(ch)
+        if cat.startswith("C") and ch not in ["\n", "\t"]:
+            continue
+        cleaned.append(ch)
+
+    t = "".join(cleaned)
+
+    # Compactar espacios
+    t = re.sub(r"[ \t]+", " ", t)
+    t = re.sub(r"\n{3,}", "\n\n", t)
+
+    return t.strip()
 # =========================
 # ✅ Mejora RUT: anti-código-de-barras (numero_identificacion)
 # =========================
@@ -485,6 +520,7 @@ if st.button("🚀 Procesar todo"):
     if rut_pdf:
         with st.spinner("📄 RUT: extrayendo texto del PDF..."):
             rut_texto = extract_text_pymupdf(rut_pdf.read())
+            rut_texto = limpiar_texto_para_llm(rut_texto)
 
         if len(rut_texto) < 100:
             st.warning("RUT: detecté muy poco texto. Este módulo asume RUT con texto embebido.")
@@ -507,6 +543,7 @@ if st.button("🚀 Procesar todo"):
 
         with st.spinner("🔍 Cédula: haciendo OCR (EasyOCR)..."):
             cc_ocr_text = ocr_images_easyocr(images)
+            cc_ocr_text = limpiar_texto_para_llm(cc_ocr_text)
 
         with st.spinner("🤖 Cédula: extrayendo campos con IA..."):
             raw_cc = extract_cc_fields_raw(client, cc_ocr_text)
