@@ -685,180 +685,74 @@ def dataframe_to_excel_bytes(df: pd.DataFrame) -> bytes:
 # =========================
 # 🖥️ UI Streamlit
 # =========================
+st.set_page_config(page_title="OCR Atenea - Piloto", layout="centered")
+st.title("📄 OCR Atenea → Excel (Piloto)")
+st.caption("Carga RUT (PDF texto) y Cédula (PDF imagen). Descarga un Excel consolidado con el diccionario maestro.")
 
-# =========================
-# 🖥️ UI Streamlit (REDISEÑO BONITO)
-# =========================
-st.set_page_config(page_title="OCR Atenea - Piloto", page_icon="📄", layout="wide")
-
-# ---- 🎨 CSS (look & feel) ----
-st.markdown("""
-<style>
-.block-container { padding-top: 1.2rem; padding-bottom: 2rem; }
-.small-muted { color: rgba(49, 51, 63, 0.65); font-size: 0.95rem; }
-.badge {
-  display:inline-block; padding: 3px 10px; border-radius: 999px;
-  border: 1px solid rgba(49, 51, 63, 0.15);
-  background: rgba(49, 51, 63, 0.03);
-  font-size: 0.8rem; margin-left: 8px; vertical-align: middle;
-}
-.card {
-  border: 1px solid rgba(49, 51, 63, 0.12);
-  border-radius: 16px;
-  padding: 16px 16px 10px 16px;
-  background: white;
-  box-shadow: 0 6px 18px rgba(0,0,0,0.04);
-}
-.card-title { font-weight: 750; font-size: 1.02rem; margin-bottom: 0.25rem; }
-.card-meta { color: rgba(49, 51, 63, 0.65); font-size: 0.85rem; margin-bottom: 0.75rem; }
-.stButton > button { border-radius: 12px !important; padding: 0.6rem 1rem !important; }
-[data-testid="stDataFrame"] { border-radius: 14px; overflow: hidden; }
-</style>
-""", unsafe_allow_html=True)
-
-# ---- 🧠 Session state para resultados ----
-for k in ["rut_data","cc_data","doc16_data","df_master","excel_bytes","logs"]:
-    if k not in st.session_state:
-        st.session_state[k] = None
-
-# ---- 🧷 Header ----
-st.markdown("## 📄 OCR Atenea → Excel <span class='badge'>Piloto</span>", unsafe_allow_html=True)
-st.markdown("<div class='small-muted'>Carga RUT, Cédula y Certificación bancaria. Procesa y descarga un Excel consolidado según el diccionario maestro.</div>", unsafe_allow_html=True)
-st.write("")
-
-# =========================
-# 🧩 Sidebar (configuración)
-# =========================
 api_key = st.secrets.get("OPENAI_API_KEY", None) if hasattr(st, "secrets") else None
 if not api_key:
     api_key = os.environ.get("OPENAI_API_KEY")
 
-with st.sidebar:
-    st.markdown("### ⚙️ Configuración")
-    st.caption("Si estás en Streamlit Cloud, lo ideal es usar Secrets. Si no, pega la API Key aquí.")
-    api_key_input = st.text_input("🔑 OpenAI API Key", type="password", placeholder="sk-...")
+with st.expander("🔑 Configuración (si no está en Secrets)"):
+    api_key_input = st.text_input("OpenAI API Key", type="password")
     if api_key_input:
         api_key = api_key_input
 
-    st.divider()
-    st.markdown("### 🧪 Opciones")
-    mostrar_logs = st.toggle("🪵 Mostrar logs", value=False)
-    validaciones_extra = st.toggle("✅ Validaciones extra (RUT vs Cédula)", value=True)
+col1, col2, col3 = st.columns(3)
+with col1:
+    rut_pdf = st.file_uploader("📤 Cargar RUT (PDF)", type=["pdf"], key="rut_pdf")
+with col2:
+    cc_pdf = st.file_uploader("🪪 Cargar Cédula (PDF imagen)", type=["pdf"], key="cc_pdf")
+with col3:
+    doc16_pdf = st.file_uploader("🏦 Cargar Certificación bancaria (PDF)", type=["pdf"], key="doc16_pdf")
 
-    st.divider()
-    st.markdown("### 🧭 Ayuda rápida")
-    st.caption("• RUT: PDF con texto seleccionable (ideal)\n\n• Cédula: PDF imagen (escaneada)\n\n• DOC16: PDF texto o escaneado")
 
-# =========================
-# ✅ Paso 1: Carga (tarjetas)
-# =========================
-st.markdown("### 1) Carga de documentos")
-c1, c2, c3 = st.columns(3, gap="large")
+if st.button("🚀 Procesar todo"):
+    # Inicializaciones (evita NameError)
+    rut_data = None
+    cc_data = None
+    doc16_data = None
+    rut_texto = ""
+    doc16_texto = ""
 
-def uploader_card(col, icon, title, meta, key, help_text):
-    with col:
-        st.markdown(f"<div class='card'><div class='card-title'>{icon} {title}</div><div class='card-meta'>{meta}</div>", unsafe_allow_html=True)
-        f = st.file_uploader("", type=["pdf"], accept_multiple_files=False, key=key, help=help_text, label_visibility="collapsed")
-        if f is None:
-            st.info("📌 Aún no cargado")
-        else:
-            st.success(f"✅ Cargado: {f.name}")
-        st.markdown("</div>", unsafe_allow_html=True)
-    return f
-
-rut_pdf = uploader_card(
-    c1, "🧾", "RUT (PDF texto)",
-    "Recomendado: PDF con texto seleccionable",
-    "rut_pdf",
-    "Si el RUT es escaneado, puede venir con poco texto y requerir OCR parcial."
-)
-
-cc_pdf = uploader_card(
-    c2, "🪪", "Cédula (PDF imagen)",
-    "Escaneada / foto en PDF",
-    "cc_pdf",
-    "PDF imagen: el texto no se puede seleccionar; se procesa con OCR."
-)
-
-doc16_pdf = uploader_card(
-    c3, "🏦", "Certificación bancaria (DOC16)",
-    "Formato variable según banco",
-    "doc16_pdf",
-    "PDF texto o escaneado. Se intenta texto embebido y luego OCR."
-)
-
-# =========================
-# 🚀 Paso 2: Procesar
-# =========================
-st.write("")
-st.markdown("### 2) Procesar")
-files_loaded = any([rut_pdf, cc_pdf, doc16_pdf])
-
-col_btn, col_note = st.columns([1, 2], gap="large")
-with col_btn:
-    run = st.button("🚀 Procesar todo", type="primary", disabled=not files_loaded)
-
-with col_note:
-    if not files_loaded:
-        st.warning("Carga al menos un documento para habilitar el procesamiento.")
-    else:
-        st.info("Listo para procesar ✅")
-
-# =========================
-# 🔄 Procesamiento
-# =========================
-if run:
+    # ✅ Crear cliente OpenAI
     if not api_key:
         st.error("Falta la OPENAI_API_KEY. Ponla en Secrets (Cloud) o pégala en configuración.")
         st.stop()
-
     client = OpenAI(api_key=api_key)
 
-    # Reset resultados anteriores
-    st.session_state.rut_data = None
-    st.session_state.cc_data = None
-    st.session_state.doc16_data = None
-    st.session_state.df_master = None
-    st.session_state.excel_bytes = None
-    st.session_state.logs = []
-
-    progress = st.progress(0, text="Iniciando…")
-    step = 0
-    total_steps = sum([rut_pdf is not None, cc_pdf is not None, doc16_pdf is not None]) * 3 + 1
-    total_steps = max(total_steps, 2)
-
-    def tick(msg):
-        nonlocal step
-        step += 1
-        progress.progress(min(step / total_steps, 1.0), text=msg)
-        st.session_state.logs.append(msg)
-
+    # -------------------------
     # ---- RUT ----
+    # -------------------------
     if rut_pdf:
-        rut_bytes = rut_pdf.read()
+        rut_bytes = rut_pdf.read()  # ✅ guardar bytes una sola vez
 
-        tick("📄 RUT: extrayendo texto del PDF…")
-        rut_texto = extract_text_pymupdf(rut_bytes)
-        rut_texto = limpiar_texto_para_llm(rut_texto)
+        with st.spinner("📄 RUT: extrayendo texto del PDF..."):
+            rut_texto = extract_text_pymupdf(rut_bytes)
+            rut_texto = limpiar_texto_para_llm(rut_texto)
 
         if len(rut_texto) < 100:
-            tick("⚠️ RUT: poco texto detectado (PDF escaneado). Continuaré con IA igualmente.")
+            st.warning("RUT: detecté muy poco texto. Intentaré extracción por OCR/layout.")
             rut_texto = ""
 
-        tick("🤖 RUT: extrayendo campos con IA…")
-        raw = extract_rut_fields_raw(client, rut_texto)
-        rut_data = normalizar_campos_rut(safe_json_loads(raw), rut_texto=rut_texto)
+        with st.spinner("🤖 RUT: extrayendo campos con IA..."):
+            raw = extract_rut_fields_raw(client, rut_texto)
+            rut_data = normalizar_campos_rut(safe_json_loads(raw), rut_texto=rut_texto)
 
-        tick("🧠 RUT: validando número de identificación (campo 26)…")
+        # ✅ Fallback OCR SOLO para numero_identificacion (versión campo 26)
         id_ocr = None
+        
+        # 1) Tomamos lo que quedó tras IA + normalización básica
         rut_num = rut_data.get("numero_identificacion")
-
+        
+        # 2) Si es sospechoso → OCR recortado del campo 26
         if numero_id_es_sospechoso(rut_num):
             id_ocr = ocr_numero_identificacion_desde_campo26(rut_bytes)
             if id_ocr:
                 rut_data["numero_identificacion"] = id_ocr
                 rut_data["_fuente_numero_identificacion"] = "ocr_campo26"
-
+        
+        # 3) Si NO hubo OCR exitoso → validar contra texto (campo 26)
         if not id_ocr:
             numero_validado = validar_numero_identificacion(rut_texto, rut_data.get("numero_identificacion"))
             if numero_validado:
@@ -867,138 +761,76 @@ if run:
             else:
                 rut_data["_fuente_numero_identificacion"] = "ia_no_validado"
 
-        st.session_state.rut_data = rut_data
-
+    # -------------------------
     # ---- CÉDULA ----
+    # -------------------------
     if cc_pdf:
         cc_bytes = cc_pdf.read()
 
-        tick("🪪 Cédula: renderizando PDF a imágenes…")
-        images = pdf_to_images_pymupdf(cc_bytes, zoom=2.5)
+        with st.spinner("🪪 Cédula: renderizando PDF a imágenes..."):
+            images = pdf_to_images_pymupdf(cc_bytes, zoom=2.5)
 
-        tick("🔍 Cédula: OCR (EasyOCR)…")
-        cc_ocr_text = ocr_images_easyocr(images)
-        cc_ocr_text = limpiar_texto_para_llm(cc_ocr_text)
+        with st.spinner("🔍 Cédula: haciendo OCR (EasyOCR)..."):
+            cc_ocr_text = ocr_images_easyocr(images)
+            cc_ocr_text = limpiar_texto_para_llm(cc_ocr_text)
 
-        tick("🤖 Cédula: extrayendo campos con IA…")
-        raw_cc = extract_cc_fields_raw(client, cc_ocr_text)
-        cc_data = normalizar_campos_cc(safe_json_loads(raw_cc))
-        st.session_state.cc_data = cc_data
+        with st.spinner("🤖 Cédula: extrayendo campos con IA..."):
+            raw_cc = extract_cc_fields_raw(client, cc_ocr_text)
+            cc_data = normalizar_campos_cc(safe_json_loads(raw_cc))
 
-    # ---- DOC16 ----
+        st.success("✅ Cédula lista")
+        st.dataframe(pd.DataFrame([cc_data]), use_container_width=True)
+
+    else:
+        st.info("ℹ️ No cargaste Cédula. El Excel saldrá con DOC12 en blanco.")
+
+    
+    # -------------------------
+    # ---- DOC16: CERTIFICACIÓN BANCARIA ----
+    # -------------------------
     if doc16_pdf:
         doc16_bytes = doc16_pdf.read()
 
-        tick("🏦 DOC16: extrayendo texto (PDF/OCR)…")
-        doc16_texto = extract_doc16_text(doc16_bytes)
+        with st.spinner("🏦 DOC16: extrayendo texto (PDF/OCR)..."):
+            doc16_texto = extract_doc16_text(doc16_bytes)
 
         if len(doc16_texto) < 80:
-            tick("⚠️ DOC16: poco texto detectado incluso con OCR (calidad baja).")
+            st.warning("DOC16: detecté muy poco texto incluso con OCR. Puede ser un PDF escaneado de baja calidad.")
 
-        tick("🤖 DOC16: extrayendo campos con IA…")
-        raw_16 = extract_doc16_fields_raw(client, doc16_texto)
-        doc16_data = normalizar_campos_doc16(safe_json_loads(raw_16), texto=doc16_texto)
-        st.session_state.doc16_data = doc16_data
+        with st.spinner("🤖 DOC16: extrayendo campos con IA..."):
+            raw_16 = extract_doc16_fields_raw(client, doc16_texto)
+            doc16_data = normalizar_campos_doc16(safe_json_loads(raw_16), texto=doc16_texto)
 
-    # ---- Validación cruzada (opcional) ----
-    if validaciones_extra and st.session_state.rut_data and st.session_state.cc_data:
-        rut_num = only_digits(st.session_state.rut_data.get("numero_identificacion"))
-        cc_num = only_digits(st.session_state.cc_data.get("doc_numero"))
-        if rut_num and cc_num:
-            if rut_num == cc_num:
-                tick(f"✅ Validación: coinciden (RUT y Cédula) → {rut_num}")
-            else:
-                tick(f"❌ Validación: NO coinciden → RUT {rut_num} vs Cédula {cc_num}")
-
-    # ---- Consolidado ----
-    tick("📌 Generando consolidado (diccionario maestro)…")
-    df_master = fill_master_values(st.session_state.rut_data, st.session_state.cc_data, st.session_state.doc16_data)
-    st.session_state.df_master = df_master
-    st.session_state.excel_bytes = dataframe_to_excel_bytes(df_master)
-
-    progress.progress(1.0, text="Listo ✅")
-
-# =========================
-# 📊 Paso 3: Resultados (tabs)
-# =========================
-st.write("")
-st.markdown("### 3) Resultados")
-
-k1, k2, k3 = st.columns(3)
-docs_count = sum([rut_pdf is not None, cc_pdf is not None, doc16_pdf is not None])
-processed_count = sum([
-    st.session_state.rut_data is not None,
-    st.session_state.cc_data is not None,
-    st.session_state.doc16_data is not None
-])
-
-k1.metric("📦 Documentos cargados", docs_count)
-k2.metric("✅ Documentos procesados", processed_count)
-k3.metric("⬇️ Excel", "Listo" if st.session_state.excel_bytes else "Pendiente")
-
-tab_res, tab_cc, tab_rut, tab_16, tab_master, tab_xls = st.tabs(
-    ["🧩 Resumen", "🪪 Cédula", "🧾 RUT", "🏦 DOC16", "📌 Consolidado", "⬇️ Descargar"]
-)
-
-with tab_res:
-    st.caption("Resumen de ejecución y alertas.")
-    if st.session_state.logs:
-        if mostrar_logs:
-            with st.expander("🪵 Logs"):
-                for line in st.session_state.logs:
-                    st.write("•", line)
-        else:
-            st.info("Activa “🪵 Mostrar logs” en el sidebar si quieres ver el detalle.")
+        st.success("✅ DOC16 listo")
+        st.dataframe(pd.DataFrame([doc16_data]), use_container_width=True)
     else:
-        st.info("Aún no has procesado nada.")
+        st.info("ℹ️ No cargaste DOC16. El Excel saldrá con DOC16 en blanco.")
 
-    # Mini resumen de validación
-    if validaciones_extra and st.session_state.rut_data and st.session_state.cc_data:
-        rut_num = only_digits(st.session_state.rut_data.get("numero_identificacion"))
-        cc_num = only_digits(st.session_state.cc_data.get("doc_numero"))
+# -------------------------
+    # ✅ Verificación (NO forzar)
+    # -------------------------
+    if rut_data and cc_data:
+        rut_num = only_digits(rut_data.get("numero_identificacion"))
+        cc_num = only_digits(cc_data.get("doc_numero"))
+
         if rut_num and cc_num:
             if rut_num == cc_num:
                 st.success(f"✅ Coinciden: {rut_num}")
             else:
                 st.error(f"❌ NO coinciden → RUT: {rut_num} vs Cédula: {cc_num}")
-                st.info(f"Fuente RUT numero_identificacion: {st.session_state.rut_data.get('_fuente_numero_identificacion')}")
+                st.info(f"Fuente RUT numero_identificacion: {rut_data.get('_fuente_numero_identificacion')}")
 
-with tab_cc:
-    if st.session_state.cc_data is None:
-        st.info("Aún no hay resultado de Cédula.")
-    else:
-        st.success("✅ Cédula lista")
-        st.dataframe(pd.DataFrame([st.session_state.cc_data]), use_container_width=True)
+    # -------------------------
+    # ---- Consolidado ----
+    # -------------------------
+    df_master = fill_master_values(rut_data, cc_data, doc16_data)
+    st.subheader("📌 Consolidado (Diccionario maestro)")
+    st.dataframe(df_master, use_container_width=True)
 
-with tab_rut:
-    if st.session_state.rut_data is None:
-        st.info("Aún no hay resultado de RUT.")
-    else:
-        st.success("✅ RUT listo")
-        st.dataframe(pd.DataFrame([st.session_state.rut_data]), use_container_width=True)
-
-with tab_16:
-    if st.session_state.doc16_data is None:
-        st.info("Aún no hay resultado de DOC16.")
-    else:
-        st.success("✅ DOC16 listo")
-        st.dataframe(pd.DataFrame([st.session_state.doc16_data]), use_container_width=True)
-
-with tab_master:
-    if st.session_state.df_master is None:
-        st.info("Aún no hay consolidado.")
-    else:
-        st.subheader("📌 Consolidado (Diccionario maestro)")
-        st.dataframe(st.session_state.df_master, use_container_width=True)
-
-with tab_xls:
-    if st.session_state.excel_bytes:
-        st.success("✅ Excel consolidado listo para descarga")
-        st.download_button(
-            "💾 Descargar Excel consolidado (diccionario_maestro.xlsx)",
-            data=st.session_state.excel_bytes,
-            file_name="diccionario_maestro.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
-    else:
-        st.info("Cuando proceses, aquí aparecerá el botón de descarga.")
+    excel_bytes = dataframe_to_excel_bytes(df_master)
+    st.download_button(
+        "⬇️ Descargar Excel consolidado (diccionario_maestro.xlsx)",
+        data=excel_bytes,
+        file_name="diccionario_maestro.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
