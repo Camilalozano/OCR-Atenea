@@ -542,24 +542,16 @@ with col2:
     cc_pdf = st.file_uploader("🪪 Cargar Cédula (PDF imagen)", type=["pdf"], key="cc_pdf")
 
 if st.button("🚀 Procesar todo"):
+    rut_data = None
+    cc_data = None
+    rut_texto = ""
+    
     ...
     # ---- CÉDULA ----
     if cc_pdf:
         ...
     else:
         st.info("ℹ️ No cargaste Cédula. El Excel saldrá con DOC12 en blanco.")
-
-    # ✅ Verificación de coincidencia (NO forzar)  ← ADENTRO DEL BOTÓN
-    if rut_data and cc_data:
-        rut_num = only_digits(rut_data.get("numero_identificacion"))
-        cc_num = only_digits(cc_data.get("doc_numero"))
-
-        if rut_num and cc_num:
-            if rut_num == cc_num:
-                st.success(f"✅ Coinciden: {rut_num}")
-            else:
-                st.error(f"❌ NO coinciden → RUT: {rut_num} vs Cédula: {cc_num}")
-                st.info(f"Fuente RUT numero_identificacion: {rut_data.get('_fuente_numero_identificacion')}")
 
            # ---- RUT ----
     if rut_pdf:
@@ -625,6 +617,18 @@ if st.button("🚀 Procesar todo"):
         st.info("ℹ️ No cargaste Cédula. El Excel saldrá con DOC12 en blanco.")
 
  
+    # ✅ Verificación de coincidencia (NO forzar)  ← ADENTRO DEL BOTÓN
+    if rut_data and cc_data:
+        rut_num = only_digits(rut_data.get("numero_identificacion"))
+        cc_num = only_digits(cc_data.get("doc_numero"))
+
+        if rut_num and cc_num:
+            if rut_num == cc_num:
+                st.success(f"✅ Coinciden: {rut_num}")
+            else:
+                st.error(f"❌ NO coinciden → RUT: {rut_num} vs Cédula: {cc_num}")
+                st.info(f"Fuente RUT numero_identificacion: {rut_data.get('_fuente_numero_identificacion')}")
+
     
     
     # ---- Consolidado diccionario maestro ----
