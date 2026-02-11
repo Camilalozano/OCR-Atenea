@@ -1,5 +1,3 @@
-# Descripción avance del proceso: Dos documentos (Rut y cedula) con extracción y una regla muy simple de validación
-
 import os
 import re
 import json
@@ -213,15 +211,12 @@ def validar_numero_identificacion(texto: str, candidato: str) -> str | None:
     if not (8 <= len(candidato) <= 10):
         return None
 
-    patron = re.compile(
-    r"26\.\s*N[uú]mero de Identificaci[oó]n\s*[:\s]*([0-9][0-9\s]{7,20})",
-    re.IGNORECASE
-    )
+    patron = re.compile(r"26\.\s*Número de Identificación\s*[\n: ]+\s*(\d{8,10})")
     match = patron.search(texto)
+
     if match:
-        cand = re.sub(r"\D", "", match.group(1))
-        if 8 <= len(cand) <= 10:
-            return cand
+        return match.group(1)
+
     return None
 # =========================
 # 📄 Extracción RUT (texto embebido)
@@ -290,6 +285,9 @@ def normalizar_campos_rut(data: dict, rut_texto: str = "") -> dict:
 @st.cache_resource
 def get_easyocr_reader():
     return easyocr.Reader(["es"], gpu=False)
+
+# (opcional) alias por compatibilidad si ya usas get_ocr_reader en otros lados
+get_ocr_reader = get_easyocr_reader
 
 # (opcional) alias por compatibilidad si ya usas get_ocr_reader en otros lados
 get_ocr_reader = get_easyocr_reader
@@ -396,6 +394,165 @@ def normalizar_campos_cc(data: dict) -> dict:
 
 
 # =========================
+# 🏦 DOC16 - Certificación bancaria (texto/OCR + IA + reglas)
+# =========================
+def normalize_date_es(x: str | None) -> str | None:
+    """Intenta normalizar fechas en español a YYYY-MM-DD cuando sea posible."""
+    if not x:
+        return None
+    s = str(x).strip()
+    s_norm = unicodedata.normalize("NFKC", s).upper()
+
+    # ISO ya
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", s_norm):
+        return s_norm
+
+    # dd/mm/yyyy o dd-mm-yyyy
+    m = re.search(r"(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})", s_norm)
+    if m:
+        dd = int(m.group(1)); mm = int(m.group(2)); yyyy = int(m.group(3))
+        if yyyy < 100:
+            yyyy += 2000
+        return f"{yyyy:04d}-{mm:02d}-{dd:02d}"
+
+    months = {
+        "ENERO":1, "FEBRERO":2, "MARZO":3, "ABRIL":4, "MAYO":5, "JUNIO":6,
+        "JULIO":7, "AGOSTO":8, "SEPTIEMBRE":9, "SETIEMBRE":9, "OCTUBRE":10,
+        "NOVIEMBRE":11, "DICIEMBRE":12
+    }
+    # "5 de febrero de 2026" / "05 FEBRERO 2026"
+    m = re.search(r"(\d{1,2})\s*(?:DE\s*)?([A-ZÁÉÍÓÚÑ]+)\s*(?:DE\s*)?(\d{4})", s_norm)
+    if m and m.group(2) in months:
+        dd = int(m.group(1)); mm = months[m.group(2)]; yyyy = int(m.group(3))
+        return f"{yyyy:04d}-{mm:02d}-{dd:02d}"
+
+    return s.strip()
+
+def extraer_banco_nit_regla(texto: str) -> str | None:
+    # NIT 800.244.627-7 / N.I.T. 800.244.627
+    m = re.search(r"\bN\.?I\.?T\.?\s*[:\- ]*([0-9\.]{5,15}(?:\-[0-9])?)", texto, re.IGNORECASE)
+    if not m:
+        return None
+    return m.group(1).strip()
+
+def extraer_numero_cuenta_regla(texto: str) -> str | None:
+    # Cuenta / No. Cuenta / Cuenta de Inversión
+    patterns = [
+        r"\bN[°o]?\.?\s*CUENTA\s*[:\- ]*([0-9\- ]{6,30})",
+        r"\bCUENTA\s*[:\- ]*([0-9\- ]{6,30})",
+        r"\bCUENTA\s+DE\s+INVERSI[ÓO]N\s*[:\- ]*([0-9\- ]{6,30})",
+    ]
+    for pat in patterns:
+        m = re.search(pat, texto, re.IGNORECASE)
+        if m:
+            cand = re.sub(r"\D", "", m.group(1))
+            if 6 <= len(cand) <= 30:
+                return cand
+    return None
+
+def extraer_estado_cuenta_regla(texto: str) -> str | None:
+    t = texto.upper()
+    if "INACT" in t:
+        return "INACTIVA"
+    if "ACTIV" in t:
+        return "ACTIVA"
+    return None
+
+def extract_doc16_fields_raw(client: OpenAI, text: str) -> str:
+    prompt = f"""
+A partir del texto de una CERTIFICACIÓN BANCARIA (Colombia), extrae SOLO estos campos y devuelve SOLO JSON válido:
+- doc_tipo
+- banco_nombre
+- banco_nit
+- producto_tipo
+- producto_nombre
+- numero_cuenta
+- fecha_apertura
+- titular_nombre
+- titular_tipo_documento
+- titular_num_documento
+- estado_cuenta
+- fecha_expedicion
+- ciudad_expedicion
+
+REGLAS:
+- Si un campo no aparece, pon null.
+- No inventes datos.
+- numero_cuenta y titular_num_documento deben quedar SOLO con dígitos (sin puntos ni espacios) si aplica.
+- doc_tipo: si el documento es certificación bancaria escribe "Certificación bancaria"; si no, pon null.
+- Devuelve SOLO JSON válido, sin texto adicional.
+
+TEXTO:
+{text}
+"""
+    resp = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "Devuelve SOLO JSON válido. Sin markdown."},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0,
+    )
+    return resp.choices[0].message.content
+
+def normalizar_campos_doc16(data: dict, texto: str = "") -> dict:
+    data = data or {}
+
+    # Normalizar texto base
+    for k in ["doc_tipo","banco_nombre","producto_tipo","producto_nombre",
+              "titular_nombre","titular_tipo_documento","ciudad_expedicion"]:
+        data[k] = normalize_text(data.get(k))
+
+    # IDs / números
+    data["numero_cuenta"] = only_digits(data.get("numero_cuenta"))
+    data["titular_num_documento"] = only_digits(data.get("titular_num_documento"))
+
+    # Fechas
+    data["fecha_apertura"] = normalize_date_es(data.get("fecha_apertura"))
+    data["fecha_expedicion"] = normalize_date_es(data.get("fecha_expedicion"))
+
+    # Reglas complementarias (si IA dejó vacío o raro)
+    if not data.get("banco_nit"):
+        nit = extraer_banco_nit_regla(texto)
+        if nit:
+            data["banco_nit"] = nit
+
+    if not data.get("numero_cuenta"):
+        nc = extraer_numero_cuenta_regla(texto)
+        if nc:
+            data["numero_cuenta"] = nc
+
+    if not data.get("estado_cuenta"):
+        est = extraer_estado_cuenta_regla(texto)
+        if est:
+            data["estado_cuenta"] = est
+
+    # Banco nombre: fallback simple por marcas conocidas (evita inventar)
+    if not data.get("banco_nombre"):
+        t = texto.upper()
+        if "BANCOLOMBIA" in t:
+            data["banco_nombre"] = "Bancolombia"
+        elif "DAVIVIENDA" in t:
+            data["banco_nombre"] = "Davivienda"
+        elif "SCOTIABANK" in t or "COLPATRIA" in t:
+            data["banco_nombre"] = "Scotiabank Colpatria"
+
+    return data
+
+def extract_doc16_text(pdf_bytes: bytes) -> str:
+    """Primero intenta texto embebido; si no, OCR a imagen con EasyOCR."""
+    text = extract_text_pymupdf(pdf_bytes)
+    text = limpiar_texto_para_llm(text)
+    if len(text) >= 120:
+        return text
+
+    # OCR fallback (1-2 páginas típicamente)
+    images = pdf_to_images_pymupdf(pdf_bytes, zoom=2.5)
+    ocr_text = ocr_images_easyocr(images)
+    return limpiar_texto_para_llm(ocr_text)
+
+
+# =========================
 # 📦 Diccionario maestro + Excel consolidado
 # =========================
 MASTER_ROWS = [
@@ -448,10 +605,39 @@ MASTER_ROWS = [
      "Nombre de la Variable": "doc_huella_indice", "Tipo_Variable": "texto", "Caracterización": "Huella índice"},
     {"doc_id": "DOC12", "Fuente": "DOC12_DocumentoIdentificacion", "Caracterización variable": "Firma (opcional)",
      "Nombre de la Variable": "doc_firma_titular", "Tipo_Variable": "texto", "Caracterización": "Firma titular"},
+
+    # ---------- DOC16 (Certificación bancaria) ----------
+    {"doc_id": "DOC16", "Fuente": "DOC16_CertificacionBancaria", "Caracterización variable": "Identificación del documento",
+     "Nombre de la Variable": "doc_tipo", "Tipo_Variable": "texto", "Caracterización": "Certificación bancaria / Certifica a quien interese que…"},
+    {"doc_id": "DOC16", "Fuente": "DOC16_CertificacionBancaria", "Caracterización variable": "Entidad financiera",
+     "Nombre de la Variable": "banco_nombre", "Tipo_Variable": "texto", "Caracterización": "Nombre banco"},
+    {"doc_id": "DOC16", "Fuente": "DOC16_CertificacionBancaria", "Caracterización variable": "Entidad financiera",
+     "Nombre de la Variable": "banco_nit", "Tipo_Variable": "texto", "Caracterización": "NIT banco"},
+    {"doc_id": "DOC16", "Fuente": "DOC16_CertificacionBancaria", "Caracterización variable": "Producto",
+     "Nombre de la Variable": "producto_tipo", "Tipo_Variable": "texto", "Caracterización": "Tipo producto (Cuenta de ahorro / corriente)"},
+    {"doc_id": "DOC16", "Fuente": "DOC16_CertificacionBancaria", "Caracterización variable": "Producto",
+     "Nombre de la Variable": "producto_nombre", "Tipo_Variable": "texto", "Caracterización": "Nombre del producto"},
+    {"doc_id": "DOC16", "Fuente": "DOC16_CertificacionBancaria", "Caracterización variable": "Producto",
+     "Nombre de la Variable": "numero_cuenta", "Tipo_Variable": "texto", "Caracterización": "Número de cuenta"},
+    {"doc_id": "DOC16", "Fuente": "DOC16_CertificacionBancaria", "Caracterización variable": "Producto",
+     "Nombre de la Variable": "fecha_apertura", "Tipo_Variable": "fecha", "Caracterización": "Fecha de apertura"},
+    {"doc_id": "DOC16", "Fuente": "DOC16_CertificacionBancaria", "Caracterización variable": "Titular",
+     "Nombre de la Variable": "titular_nombre", "Tipo_Variable": "texto", "Caracterización": "Nombre del titular"},
+    {"doc_id": "DOC16", "Fuente": "DOC16_CertificacionBancaria", "Caracterización variable": "Titular",
+     "Nombre de la Variable": "titular_tipo_documento", "Tipo_Variable": "texto", "Caracterización": "Tipo documento titular"},
+    {"doc_id": "DOC16", "Fuente": "DOC16_CertificacionBancaria", "Caracterización variable": "Titular",
+     "Nombre de la Variable": "titular_num_documento", "Tipo_Variable": "texto", "Caracterización": "Número documento titular"},
+    {"doc_id": "DOC16", "Fuente": "DOC16_CertificacionBancaria", "Caracterización variable": "Estado",
+     "Nombre de la Variable": "estado_cuenta", "Tipo_Variable": "texto", "Caracterización": "Estado (ACTIVA/INACTIVA)"},
+    {"doc_id": "DOC16", "Fuente": "DOC16_CertificacionBancaria", "Caracterización variable": "Expedición",
+     "Nombre de la Variable": "fecha_expedicion", "Tipo_Variable": "texto", "Caracterización": "Fecha de expedición (día/mes/año en texto)"},
+    {"doc_id": "DOC16", "Fuente": "DOC16_CertificacionBancaria", "Caracterización variable": "Expedición",
+     "Nombre de la Variable": "ciudad_expedicion", "Tipo_Variable": "texto", "Caracterización": "Ciudad (si está indicada)"},
+
 ]
 
 
-def fill_master_values(rut_data: dict | None, cc_data: dict | None) -> pd.DataFrame:
+def fill_master_values(rut_data: dict | None, cc_data: dict | None, doc16_data: dict | None) -> pd.DataFrame:
     rows = [r.copy() for r in MASTER_ROWS]
 
     # RUT
@@ -474,6 +660,17 @@ def fill_master_values(rut_data: dict | None, cc_data: dict | None) -> pd.DataFr
                     r["Valor"] = "Documento de identidad (Cédula de ciudadanía) – imagen anverso/reverso"
                 else:
                     r["Valor"] = cc_data.get(key)
+
+    # DOC16 - Certificación bancaria
+    if doc16_data:
+        for r in rows:
+            if r["doc_id"] == "DOC16":
+                key = r["Nombre de la Variable"]
+                if key == "doc_tipo":
+                    # Valor fijo del diccionario (evita que el LLM invente)
+                    r["Valor"] = "Certificación bancaria"
+                else:
+                    r["Valor"] = doc16_data.get(key)
 
     return pd.DataFrame(rows)
 
@@ -501,18 +698,22 @@ with st.expander("🔑 Configuración (si no está en Secrets)"):
     if api_key_input:
         api_key = api_key_input
 
-col1, col2 = st.columns(2)
+col1, col2, col3 = st.columns(3)
 with col1:
     rut_pdf = st.file_uploader("📤 Cargar RUT (PDF)", type=["pdf"], key="rut_pdf")
 with col2:
     cc_pdf = st.file_uploader("🪪 Cargar Cédula (PDF imagen)", type=["pdf"], key="cc_pdf")
+with col3:
+    doc16_pdf = st.file_uploader("🏦 Cargar Certificación bancaria (PDF)", type=["pdf"], key="doc16_pdf")
 
 
 if st.button("🚀 Procesar todo"):
     # Inicializaciones (evita NameError)
     rut_data = None
     cc_data = None
+    doc16_data = None
     rut_texto = ""
+    doc16_texto = ""
 
     # ✅ Crear cliente OpenAI
     if not api_key:
@@ -531,7 +732,8 @@ if st.button("🚀 Procesar todo"):
             rut_texto = limpiar_texto_para_llm(rut_texto)
 
         if len(rut_texto) < 100:
-            st.warning("RUT: detecté muy poco texto. Igual intentaré IA y el OCR recortado del campo 26.")
+            st.warning("RUT: detecté muy poco texto. Intentaré extracción por OCR/layout.")
+            rut_texto = ""
 
         with st.spinner("🤖 RUT: extrayendo campos con IA..."):
             raw = extract_rut_fields_raw(client, rut_texto)
@@ -582,7 +784,29 @@ if st.button("🚀 Procesar todo"):
     else:
         st.info("ℹ️ No cargaste Cédula. El Excel saldrá con DOC12 en blanco.")
 
+    
     # -------------------------
+    # ---- DOC16: CERTIFICACIÓN BANCARIA ----
+    # -------------------------
+    if doc16_pdf:
+        doc16_bytes = doc16_pdf.read()
+
+        with st.spinner("🏦 DOC16: extrayendo texto (PDF/OCR)..."):
+            doc16_texto = extract_doc16_text(doc16_bytes)
+
+        if len(doc16_texto) < 80:
+            st.warning("DOC16: detecté muy poco texto incluso con OCR. Puede ser un PDF escaneado de baja calidad.")
+
+        with st.spinner("🤖 DOC16: extrayendo campos con IA..."):
+            raw_16 = extract_doc16_fields_raw(client, doc16_texto)
+            doc16_data = normalizar_campos_doc16(safe_json_loads(raw_16), texto=doc16_texto)
+
+        st.success("✅ DOC16 listo")
+        st.dataframe(pd.DataFrame([doc16_data]), use_container_width=True)
+    else:
+        st.info("ℹ️ No cargaste DOC16. El Excel saldrá con DOC16 en blanco.")
+
+# -------------------------
     # ✅ Verificación (NO forzar)
     # -------------------------
     if rut_data and cc_data:
@@ -599,7 +823,7 @@ if st.button("🚀 Procesar todo"):
     # -------------------------
     # ---- Consolidado ----
     # -------------------------
-    df_master = fill_master_values(rut_data, cc_data)
+    df_master = fill_master_values(rut_data, cc_data, doc16_data)
     st.subheader("📌 Consolidado (Diccionario maestro)")
     st.dataframe(df_master, use_container_width=True)
 
