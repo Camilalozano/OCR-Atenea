@@ -561,49 +561,49 @@ if st.button("🚀 Procesar todo"):
                 st.error(f"❌ NO coinciden → RUT: {rut_num} vs Cédula: {cc_num}")
                 st.info(f"Fuente RUT numero_identificacion: {rut_data.get('_fuente_numero_identificacion')}")
 
-    # ---- RUT ----
-if rut_pdf:
-    rut_bytes = rut_pdf.read()  # ✅ guardar bytes una sola vez
-
-    with st.spinner("📄 RUT: extrayendo texto del PDF..."):
-        rut_texto = extract_text_pymupdf(rut_bytes)
-        rut_texto = limpiar_texto_para_llm(rut_texto)
-
-    if len(rut_texto) < 100:
-        st.warning("RUT: detecté muy poco texto. Intentaré extracción por OCR/layout.")
-        rut_texto = ""  # para que no rompa validadores
-
-    with st.spinner("🤖 RUT: extrayendo campos con IA..."):
-        raw = extract_rut_fields_raw(client, rut_texto)
-        rut_data = normalizar_campos_rut(safe_json_loads(raw), rut_texto=rut_texto)
-
-    # ✅ Capa 1: Layout (más confiable)
-    numero_layout = extraer_numero_rut_por_layout(rut_bytes)
-
-    # ✅ Capa 2: ya está (regex campo 26 dentro de validar_numero_identificacion_rut)
-    # rut_data["numero_identificacion"] ya viene validado
-
-    # ✅ Capa 3: OCR fallback si sigue sospechoso o vacío
-    rut_num = only_digits(rut_data.get("numero_identificacion"))
-    sospechoso = (rut_num is None) or (len(rut_num) < 8) or (len(rut_num) > 10)
-
-    if numero_layout:
-        rut_data["numero_identificacion"] = numero_layout
-        rut_data["_fuente_numero_identificacion"] = "layout"
-    elif sospechoso:
-        numero_ocr = extraer_numero_rut_por_ocr(rut_bytes)
-        if numero_ocr:
-            rut_data["numero_identificacion"] = numero_ocr
-            rut_data["_fuente_numero_identificacion"] = "ocr"
-        else:
-            rut_data["_fuente_numero_identificacion"] = "ia/regex"
-
-    st.success("✅ RUT listo")
-    st.dataframe(pd.DataFrame([rut_data]), use_container_width=True)
-
-else:
-    st.info("ℹ️ No cargaste RUT. El Excel saldrá con DOC14 en blanco.")
+           # ---- RUT ----
+    if rut_pdf:
+        rut_bytes = rut_pdf.read()  # ✅ guardar bytes una sola vez
     
+        with st.spinner("📄 RUT: extrayendo texto del PDF..."):
+            rut_texto = extract_text_pymupdf(rut_bytes)
+            rut_texto = limpiar_texto_para_llm(rut_texto)
+    
+        if len(rut_texto) < 100:
+            st.warning("RUT: detecté muy poco texto. Intentaré extracción por OCR/layout.")
+            rut_texto = ""  # para que no rompa validadores
+    
+        with st.spinner("🤖 RUT: extrayendo campos con IA..."):
+            raw = extract_rut_fields_raw(client, rut_texto)
+            rut_data = normalizar_campos_rut(safe_json_loads(raw), rut_texto=rut_texto)
+    
+        # ✅ Capa 1: Layout (más confiable)
+        numero_layout = extraer_numero_rut_por_layout(rut_bytes)
+    
+        # ✅ Capa 2: ya está (regex campo 26 dentro de validar_numero_identificacion_rut)
+        # rut_data["numero_identificacion"] ya viene validado
+    
+        # ✅ Capa 3: OCR fallback si sigue sospechoso o vacío
+        rut_num = only_digits(rut_data.get("numero_identificacion"))
+        sospechoso = (rut_num is None) or (len(rut_num) < 8) or (len(rut_num) > 10)
+    
+        if numero_layout:
+            rut_data["numero_identificacion"] = numero_layout
+            rut_data["_fuente_numero_identificacion"] = "layout"
+        elif sospechoso:
+            numero_ocr = extraer_numero_rut_por_ocr(rut_bytes)
+            if numero_ocr:
+                rut_data["numero_identificacion"] = numero_ocr
+                rut_data["_fuente_numero_identificacion"] = "ocr"
+            else:
+                rut_data["_fuente_numero_identificacion"] = "ia/regex"
+    
+        st.success("✅ RUT listo")
+        st.dataframe(pd.DataFrame([rut_data]), use_container_width=True)
+    
+    else:
+        st.info("ℹ️ No cargaste RUT. El Excel saldrá con DOC14 en blanco.")
+        
     # ---- CÉDULA ----
     if cc_pdf:
         cc_bytes = cc_pdf.read()
@@ -624,6 +624,8 @@ else:
     else:
         st.info("ℹ️ No cargaste Cédula. El Excel saldrá con DOC12 en blanco.")
 
+ 
+    
     
     # ---- Consolidado diccionario maestro ----
     df_master = fill_master_values(rut_data, cc_data)
