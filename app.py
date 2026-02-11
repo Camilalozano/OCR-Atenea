@@ -111,70 +111,113 @@ def limpiar_texto_para_llm(text: str) -> str:
 # =========================
 # ✅ Mejora RUT: anti-código-de-barras (numero_identificacion)
 # =========================
-def extraer_numero_identificacion_rut_desde_texto(text: str) -> str | None:
+def ocr_numero_identificacion_desde_campo26(pdf_bytes: bytes) -> str | None:
     """
-    Versión robusta:
-    - Prioriza 26. Número de Identificación
-    - SOLO acepta 8-10 dígitos (evita falsos positivos típicos)
+    Busca en el PDF el texto 'Número de Identificación' y hace OCR SOLO en un recorte
+    cerca de ese campo para capturar la cédula correcta (8-10 dígitos).
     """
-    if not text:
-        return None
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    reader = get_easyocr_reader()
 
-    t = " ".join(text.split())
+    targets = ["Número de Identificación", "Numero de Identificacion"]
 
-    # Anclaje fuerte al campo 26
-    m = re.search(
-        r"26\.\s*N[úu]mero\s+de\s+Identificaci[óo]n\s*[:\-]?\s*([0-9][0-9\.\s]{6,20})",
-        t,
-        flags=re.IGNORECASE,
-    )
+    for page in doc:
+        rects = []
+        for t in targets:
+            rects += page.search_for(t)
+
+        if not rects:
+            continue
+
+        r = rects[0]
+
+        clip = fitz.Rect(
+            r.x0,
+            max(r.y0 - 20, 0),
+            min(r.x1 + 350, page.rect.x1),
+            min(r.y1 + 80, page.rect.y1)
+        )
+
+        pix = page.get_pixmap(clip=clip, dpi=300)
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+
+        results = reader.readtext(np.array(img), detail=0)
+
+        candidatos = []
+        for s in results:
+            dig = re.sub(r"\D", "", s)
+            if 8 <= len(dig) <= 10:
+                candidatos.append(dig)
+
+        if candidatos:
+            candidatos.sort(key=len, reverse=True)
+            return candidatos[0]
+
+    return None
+
+
+def numero_id_es_sospechoso(num: str | None) -> bool:
+    if not num:
+        return True
+    num = re.sub(r"\D", "", str(num))
+    if not (8 <= len(num) <= 10):
+        return True
+    return False
+
+
+def extraer_numero_identificacion_regla(texto: str) -> str | None:
+    """
+    Intenta extraer el campo 26. Número de Identificación (CC) del RUT.
+    Evita confundirlo con:
+      - 4. Número de formulario
+      - 5. NIT
+    """
+    t = " ".join(texto.split())
+
+    m = re.search(r"26\.\s*Número de Identificación\s*([0-9\s]{6,20})", t, re.IGNORECASE)
     if m:
-        cand = only_digits(m.group(1))
-        if cand and 8 <= len(cand) <= 10:
+        cand = re.sub(r"\D", "", m.group(1))
+        if 6 <= len(cand) <= 11:
             return cand
 
-    # Fallback: elegir mejor candidato 8-10 (10 gana)
-    nums = [only_digits(x) for x in re.findall(r"\d[\d\.\s]{6,20}", t)]
-    nums = [n for n in nums if n and 8 <= len(n) <= 10]
-    if not nums:
+    m = re.search(r"Cédula de Ciudadanía\s*([0-9\s]{6,20})", t, re.IGNORECASE)
+    if m:
+        cand = re.sub(r"\D", "", m.group(1))
+        if 6 <= len(cand) <= 11:
+            return cand
+
+    return None
+
+
+def corregir_numero_identificacion(data: dict, texto_pdf: str) -> dict:
+    """
+    Si la IA se equivoca, reemplaza numero_identificacion por el detectado en el PDF.
+    """
+    regla = extraer_numero_identificacion_regla(texto_pdf)
+    if regla:
+        data["numero_identificacion"] = regla
+    return data
+
+
+def validar_numero_identificacion(texto: str, candidato: str) -> str | None:
+    """
+    Valida que el número venga del campo 26 del RUT
+    """
+    if not candidato:
         return None
 
-    def score(n: str) -> int:
-        if len(n) == 10:
-            return 100
-        if len(n) == 9:
-            return 80
-        if len(n) == 8:
-            return 60
-        return 0
+    candidato = re.sub(r"\D", "", candidato)
 
-    nums = sorted(set(nums), key=score, reverse=True)
-    return nums[0]
-    
-def validar_numero_identificacion_rut(rut_texto: str, candidate: str | None) -> str | None:
-    """
-    - Descarta 11+ dígitos (códigos / consecutivos)
-    - SOLO permite 8-10
-    - Si candidate no aparece en texto, intenta anclaje al campo 26
-    """
-    cand = only_digits(candidate) if candidate else None
+    if not (8 <= len(candidato) <= 10):
+        return None
 
-    if not cand:
-        return extraer_numero_identificacion_rut_desde_texto(rut_texto)
+    patron = re.compile(r"26\.\s*Número de Identificación\s*[\n: ]+\s*(\d{8,10})")
+    match = patron.search(texto)
 
-    if len(cand) >= 11:
-        return extraer_numero_identificacion_rut_desde_texto(rut_texto)
+    if match:
+        return match.group(1)
 
-    if 8 <= len(cand) <= 10:
-        if rut_texto:
-            t_digits = only_digits(" ".join(rut_texto.split())) or ""
-            if cand not in t_digits:
-                anchored = extraer_numero_identificacion_rut_desde_texto(rut_texto)
-                return anchored or cand
-        return cand
-
-    return extraer_numero_identificacion_rut_desde_texto(rut_texto)
-    
+    return None
 # =========================
 # 📄 Extracción RUT (texto embebido)
 # =========================
@@ -217,119 +260,40 @@ TEXTO:
 
 def normalizar_campos_rut(data: dict, rut_texto: str = "") -> dict:
     """
-    Normaliza salida del LLM + aplica validación anti-código-de-barras para numero_identificacion.
+    Normaliza salida del LLM + aplica validación anti-error para numero_identificacion (campo 26).
     """
     data = data or {}
 
-    # ✅ FIX clave: no confiar solo en only_digits. Validar con el texto del RUT.
-    data["numero_identificacion"] = validar_numero_identificacion_rut(
-        rut_texto=rut_texto,
-        candidate=data.get("numero_identificacion"),
+    # 1) Primero intenta corregir con regla (campo 26)
+    data = corregir_numero_identificacion(data, rut_texto)
+
+    # 2) Luego valida que realmente venga del campo 26
+    data["numero_identificacion"] = validar_numero_identificacion(
+        rut_texto,
+        data.get("numero_identificacion")
     )
 
+    # Normalización de strings
     for k in ["primer_apellido", "segundo_apellido", "primer_nombre", "otros_nombres", "tipo_documento"]:
         data[k] = normalize_text(data.get(k))
 
     return data
 
-
 # =========================
 # 🪪 Extracción Cédula (PDF imagen -> OCR)
 # =========================
 @st.cache_resource
-def get_ocr_reader():
+def get_easyocr_reader():
     return easyocr.Reader(["es"], gpu=False)
+
+# (opcional) alias por compatibilidad si ya usas get_ocr_reader en otros lados
+get_ocr_reader = get_easyocr_reader
+
+# (opcional) alias por compatibilidad si ya usas get_ocr_reader en otros lados
+get_ocr_reader = get_easyocr_reader
 
 import math
 
-def extraer_numero_rut_por_layout(pdf_bytes: bytes) -> str | None:
-    """
-    Busca el label '26. Número de Identificación' por BLOQUES (coordenadas)
-    y extrae el número cercano (derecha/abajo). Ideal para RUT en tablas.
-    """
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    label_pat = re.compile(r"\b26\.\s*N[úu]mero\s+de\s+Identificaci[óo]n\b", re.IGNORECASE)
-    num_pat = re.compile(r"\b(\d{8,10})\b")  # ✅ 8-10 (NO 11)
-
-    def dist(ax, ay, bx, by):
-        return math.hypot(ax - bx, ay - by)
-
-    for page in doc:
-        blocks = page.get_text("blocks")  # (x0,y0,x1,y1,text, block_no, block_type)
-        norm = []
-        for b in blocks:
-            x0, y0, x1, y1, txt, *_ = b
-            if not txt or not str(txt).strip():
-                continue
-            t = " ".join(str(txt).split())
-            norm.append((x0, y0, x1, y1, t))
-
-        label_blocks = [bl for bl in norm if label_pat.search(bl[4])]
-        if not label_blocks:
-            continue
-
-        lx0, ly0, lx1, ly1, _ = label_blocks[0]
-        lcx, lcy = (lx0 + lx1) / 2, (ly0 + ly1) / 2
-
-        candidates = []
-        for x0, y0, x1, y1, t in norm:
-            cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
-
-            # cerca en vertical o justo debajo
-            vertical_ok = abs(cy - lcy) < 25 or (y0 > ly1 and (y0 - ly1) < 60)
-            right_ok = x0 > (lx1 - 10)       # a la derecha del label
-            below_ok = y0 >= (ly1 - 5)       # debajo del label (misma columna aprox)
-
-            if (vertical_ok and right_ok) or (below_ok and x0 >= lx0 - 5):
-                for m in num_pat.finditer(t):
-                    n = m.group(1)
-                    candidates.append((n, dist(cx, cy, lcx, lcy)))
-
-        if candidates:
-            candidates.sort(key=lambda z: z[1])  # más cercano al label
-            return candidates[0][0]
-
-    return None
-
-
-def extraer_numero_rut_por_ocr(pdf_bytes: bytes, zoom: float = 2.5) -> str | None:
-    """
-    OCR SOLO de la primera página del RUT y extrae el número del campo 26.
-    (fallback cuando el PDF no trae texto usable o el layout no encuentra bien)
-    """
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    if doc.page_count == 0:
-        return None
-
-    page = doc[0]
-    mat = fitz.Matrix(zoom, zoom)
-    pix = page.get_pixmap(matrix=mat, alpha=False)
-    img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
-
-    reader = get_ocr_reader()
-    lines = reader.readtext(np.array(img), detail=0)
-    text = " ".join([str(l) for l in lines if l])
-    text = " ".join(text.split())
-
-    # ventana cerca del campo 26
-    m = re.search(r"26\.\s*N[úu]mero\s+de\s+Identificaci[óo]n(.{0,80})", text, flags=re.IGNORECASE)
-    if m:
-        window = m.group(1)
-        m2 = re.search(r"\b(\d{8,10})\b", window)
-        if m2:
-            return m2.group(1)
-
-    # fallback: mejor candidato 10 dígitos
-    nums = re.findall(r"\b\d{8,10}\b", text)
-    if not nums:
-        return None
-
-    def score(n: str) -> int:
-        return 100 if len(n) == 10 else (80 if len(n) == 9 else 60)
-
-    nums = sorted(set(nums), key=score, reverse=True)
-    return nums[0]
-    
 def pdf_to_images_pymupdf(pdf_bytes: bytes, zoom: float = 2.5) -> list[Image.Image]:
     """
     Renderiza páginas PDF a imágenes (sin poppler), ideal para Streamlit Cloud.
@@ -572,31 +536,27 @@ if st.button("🚀 Procesar todo"):
             raw = extract_rut_fields_raw(client, rut_texto)
             rut_data = normalizar_campos_rut(safe_json_loads(raw), rut_texto=rut_texto)
 
-        # ✅ Capa 1: Layout
-        numero_layout = extraer_numero_rut_por_layout(rut_bytes)
-
-        # ✅ Capa 3: OCR fallback si vacío o sospechoso
-        rut_num = only_digits(rut_data.get("numero_identificacion"))
-        sospechoso = (rut_num is None) or (len(rut_num) < 8) or (len(rut_num) > 10)
-
-        if numero_layout:
-            rut_data["numero_identificacion"] = numero_layout
-            rut_data["_fuente_numero_identificacion"] = "layout"
-        elif sospechoso:
-            numero_ocr = extraer_numero_rut_por_ocr(rut_bytes)
-            if numero_ocr:
-                rut_data["numero_identificacion"] = numero_ocr
-                rut_data["_fuente_numero_identificacion"] = "ocr"
+        # ✅ Fallback OCR SOLO para numero_identificacion (versión campo 26)
+        id_ocr = None
+        
+        # 1) Tomamos lo que quedó tras IA + normalización básica
+        rut_num = rut_data.get("numero_identificacion")
+        
+        # 2) Si es sospechoso → OCR recortado del campo 26
+        if numero_id_es_sospechoso(rut_num):
+            id_ocr = ocr_numero_identificacion_desde_campo26(rut_bytes)
+            if id_ocr:
+                rut_data["numero_identificacion"] = id_ocr
+                rut_data["_fuente_numero_identificacion"] = "ocr_campo26"
+        
+        # 3) Si NO hubo OCR exitoso → validar contra texto (campo 26)
+        if not id_ocr:
+            numero_validado = validar_numero_identificacion(rut_texto, rut_data.get("numero_identificacion"))
+            if numero_validado:
+                rut_data["numero_identificacion"] = numero_validado
+                rut_data["_fuente_numero_identificacion"] = "validado_campo26"
             else:
-                rut_data["_fuente_numero_identificacion"] = "ia/regex"
-        else:
-            rut_data["_fuente_numero_identificacion"] = "ia/regex"
-
-        st.success("✅ RUT listo")
-        st.dataframe(pd.DataFrame([rut_data]), use_container_width=True)
-
-    else:
-        st.info("ℹ️ No cargaste RUT. El Excel saldrá con DOC14 en blanco.")
+                rut_data["_fuente_numero_identificacion"] = "ia_no_validado"
 
     # -------------------------
     # ---- CÉDULA ----
