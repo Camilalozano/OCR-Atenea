@@ -213,12 +213,15 @@ def validar_numero_identificacion(texto: str, candidato: str) -> str | None:
     if not (8 <= len(candidato) <= 10):
         return None
 
-    patron = re.compile(r"26\.\s*Número de Identificación\s*[\n: ]+\s*(\d{8,10})")
+    patron = re.compile(
+    r"26\.\s*N[uú]mero de Identificaci[oó]n\s*[:\s]*([0-9][0-9\s]{7,20})",
+    re.IGNORECASE
+    )
     match = patron.search(texto)
-
     if match:
-        return match.group(1)
-
+        cand = re.sub(r"\D", "", match.group(1))
+        if 8 <= len(cand) <= 10:
+            return cand
     return None
 # =========================
 # 📄 Extracción RUT (texto embebido)
@@ -287,9 +290,6 @@ def normalizar_campos_rut(data: dict, rut_texto: str = "") -> dict:
 @st.cache_resource
 def get_easyocr_reader():
     return easyocr.Reader(["es"], gpu=False)
-
-# (opcional) alias por compatibilidad si ya usas get_ocr_reader en otros lados
-get_ocr_reader = get_easyocr_reader
 
 # (opcional) alias por compatibilidad si ya usas get_ocr_reader en otros lados
 get_ocr_reader = get_easyocr_reader
@@ -531,8 +531,7 @@ if st.button("🚀 Procesar todo"):
             rut_texto = limpiar_texto_para_llm(rut_texto)
 
         if len(rut_texto) < 100:
-            st.warning("RUT: detecté muy poco texto. Intentaré extracción por OCR/layout.")
-            rut_texto = ""
+            st.warning("RUT: detecté muy poco texto. Igual intentaré IA y el OCR recortado del campo 26.")
 
         with st.spinner("🤖 RUT: extrayendo campos con IA..."):
             raw = extract_rut_fields_raw(client, rut_texto)
