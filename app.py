@@ -1,3 +1,5 @@
+# Descripción avance del proceso: Dos documentos (Rut y cedula) con extracción y una regla muy simple de validación
+
 import os
 import re
 import json
