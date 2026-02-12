@@ -884,6 +884,13 @@ if st.button("🚀 Procesar todo"):
             else:
                 rut_data["_fuente_numero_identificacion"] = "ia_no_validado"
 
+        # ✅ Mostrar tabla output del RUT (igual que Cédula y DOC16)
+        st.success("✅ RUT listo")
+        st.dataframe(pd.DataFrame([rut_data]), use_container_width=True)
+
+    else:
+        st.info("ℹ️ No cargaste RUT. El Excel saldrá con DOC14 en blanco.")
+
     # -------------------------
     # ---- CÉDULA ----
     # -------------------------
