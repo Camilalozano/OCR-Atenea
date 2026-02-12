@@ -11,6 +11,24 @@ from openai import OpenAI
 from PIL import Image
 import easyocr
 
+from datetime import datetime
+
+# =========================
+# ⚠️ Logging / Validaciones
+# =========================
+def inicializar_logs():
+    return []
+
+def agregar_log(logs: list, documento: str, tipo: str, mensaje: str):
+    """tipo: INFO | WARNING | ERROR"""
+    logs.append({
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "documento": documento,
+        "tipo": tipo,
+        "mensaje": mensaje
+    })
+    return logs
+
 
 # =========================
 # 💾 Utilidades generales
@@ -108,6 +126,9 @@ def limpiar_texto_para_llm(text: str) -> str:
     t = re.sub(r"\n{3,}", "\n\n", t)
 
     return t.strip()
+
+
+
 # =========================
 # ✅ Mejora RUT: anti-código-de-barras (numero_identificacion)
 # =========================
@@ -551,6 +572,108 @@ def extract_doc16_text(pdf_bytes: bytes) -> str:
     ocr_text = ocr_images_easyocr(images)
     return limpiar_texto_para_llm(ocr_text)
 
+# logs
+
+# VALIDACIÓN RUT vs CÉDULA
+def validar_rut_vs_cedula(data_rut: dict, data_cc: dict, logs: list):
+    rut_id = only_digits(data_rut.get("numero_identificacion"))
+    cc_id = only_digits(data_cc.get("doc_numero"))
+
+    if not rut_id:
+        agregar_log(
+            logs,
+            "RUT",
+            "WARNING",
+            "El RUT no tiene número de identificación extraído."
+        )
+        return logs
+
+    if not cc_id:
+        agregar_log(
+            logs,
+            "CEDULA",
+            "WARNING",
+            "La cédula no tiene número de identificación extraído."
+        )
+        return logs
+
+    if rut_id != cc_id:
+        agregar_log(
+            logs,
+            "VALIDACION_CRUZADA",
+            "WARNING",
+            f"El número de identificación del RUT ({rut_id}) NO coincide con el de la cédula ({cc_id})."
+        )
+    else:
+        agregar_log(
+            logs,
+            "VALIDACION_CRUZADA",
+            "INFO",
+            "El número de identificación del RUT coincide con el de la cédula."
+        )
+
+    return logs
+
+# VALIDACIÓN CÉDULA VACÍA
+
+def validar_cedula_vacia(data_cc: dict, logs: list):
+    cc_id = only_digits(data_cc.get("doc_numero"))
+
+    if not cc_id:
+        agregar_log(
+            logs,
+            "CEDULA",
+            "WARNING",
+            "El campo doc_numero de la cédula está vacío o no fue detectado correctamente."
+        )
+    return logs
+
+# VALIDACIÓN CERTIFICACIÓN BANCARIA (< 1 MES)
+
+def validar_fecha_certificacion_bancaria(data_doc16: dict, logs: list):
+    fecha_str = data_doc16.get("fecha_expedicion")
+
+    if not fecha_str:
+        agregar_log(
+            logs,
+            "CERTIFICACION_BANCARIA",
+            "WARNING",
+            "No se encontró fecha de expedición en la certificación bancaria."
+        )
+        return logs
+
+    try:
+        fecha_doc = datetime.strptime(fecha_str, "%Y-%m-%d")
+        hoy = datetime.today()
+
+        diferencia_dias = (hoy - fecha_doc).days
+
+        if diferencia_dias > 30:
+            agregar_log(
+                logs,
+                "CERTIFICACION_BANCARIA",
+                "WARNING",
+                f"La certificación bancaria tiene {diferencia_dias} días de expedición (mayor a 30 días)."
+            )
+        else:
+            agregar_log(
+                logs,
+                "CERTIFICACION_BANCARIA",
+                "INFO",
+                f"La certificación bancaria fue expedida hace {diferencia_dias} días (vigente)."
+            )
+
+    except Exception as e:
+        agregar_log(
+            logs,
+            "CERTIFICACION_BANCARIA",
+            "ERROR",
+            f"Error al procesar fecha de expedición: {str(e)}"
+        )
+
+    return logs
+    
+# =========================
 
 # =========================
 # 📦 Diccionario maestro + Excel consolidado
@@ -834,3 +957,29 @@ if st.button("🚀 Procesar todo"):
         file_name="diccionario_maestro.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+
+ # -------------------------
+    # ---- LOGS ----
+    # -------------------------
+    
+    # -------------------------
+    # ✅ LOGS: inicializar y validar
+    # -------------------------
+    logs = inicializar_logs()
+
+    if cc_data:
+        logs = validar_cedula_vacia(cc_data, logs)
+
+    if doc16_data:
+        logs = validar_fecha_certificacion_bancaria(doc16_data, logs)
+
+    if rut_data and cc_data:
+        logs = validar_rut_vs_cedula(rut_data, cc_data, logs)
+
+st.subheader("⚠️ Logs de Validación")
+    
+    if logs:
+        df_logs = pd.DataFrame(logs)
+        st.dataframe(df_logs)
+    else:
+        st.success("No se generaron advertencias.")
