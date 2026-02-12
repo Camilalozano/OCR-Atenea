@@ -958,10 +958,8 @@ if st.button("🚀 Procesar todo"):
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
-# -------------------------
+ # -------------------------
     # ---- LOGS ----
-    # -------------------------
-    
     # -------------------------
     # ✅ LOGS: inicializar y validar
     # -------------------------
@@ -977,9 +975,8 @@ if st.button("🚀 Procesar todo"):
         logs = validar_rut_vs_cedula(rut_data, cc_data, logs)
 
     st.subheader("⚠️ Logs de Validación")
-
     if logs:
         df_logs = pd.DataFrame(logs)
-        st.dataframe(df_logs)
+        st.dataframe(df_logs, use_container_width=True)
     else:
         st.success("No se generaron advertencias.")
