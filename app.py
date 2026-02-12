@@ -12,6 +12,7 @@ from PIL import Image
 import easyocr
 
 from datetime import datetime
+import time
 
 # =========================
 # ⚠️ Logging / Validaciones
@@ -760,6 +761,32 @@ MASTER_ROWS = [
 ]
 
 
+# =========================
+# 📊 Métricas mínimas (tiempo / completitud / warnings)
+# =========================
+def campos_esperados_por_doc(doc_id: str) -> list[str]:
+    """Devuelve los campos esperados según el diccionario maestro."""
+    return [r["Nombre de la Variable"] for r in MASTER_ROWS if r["doc_id"] == doc_id]
+
+def calcular_completitud(data: dict | None, campos_esperados: list[str]) -> float | None:
+    """% de campos esperados con valor no vacío (None/'' se considera vacío)."""
+    if not data or not campos_esperados:
+        return None
+    llenos = 0
+    for k in campos_esperados:
+        v = data.get(k)
+        if v is None:
+            continue
+        if isinstance(v, str) and v.strip() == "":
+            continue
+        llenos += 1
+    return round(100 * llenos / len(campos_esperados), 1)
+
+def contar_warnings(logs: list, documento: str) -> int:
+    return sum(1 for l in (logs or []) if l.get("tipo") == "WARNING" and l.get("documento") == documento)
+
+
+
 def fill_master_values(rut_data: dict | None, cc_data: dict | None, doc16_data: dict | None) -> pd.DataFrame:
     rows = [r.copy() for r in MASTER_ROWS]
 
@@ -838,6 +865,15 @@ if st.button("🚀 Procesar todo"):
     rut_texto = ""
     doc16_texto = ""
 
+    # =========================
+    # 📊 Métricas mínimas
+    # =========================
+    metricas = {
+        "tiempo_por_documento_s": {},
+        "completitud_por_documento_pct": {},
+        "warnings_por_documento": {},
+    }
+
     # ✅ Crear cliente OpenAI
     if not api_key:
         st.error("Falta la OPENAI_API_KEY. Ponla en Secrets (Cloud) o pégala en configuración.")
@@ -848,6 +884,7 @@ if st.button("🚀 Procesar todo"):
     # ---- RUT ----
     # -------------------------
     if rut_pdf:
+        t0_rut = time.perf_counter()
         rut_bytes = rut_pdf.read()  # ✅ guardar bytes una sola vez
 
         with st.spinner("📄 RUT: extrayendo texto del PDF..."):
@@ -888,13 +925,21 @@ if st.button("🚀 Procesar todo"):
         st.success("✅ RUT listo")
         st.dataframe(pd.DataFrame([rut_data]), use_container_width=True)
 
+        # 📊 Métricas RUT
+        metricas["tiempo_por_documento_s"]["RUT"] = round(time.perf_counter() - t0_rut, 3)
+        metricas["completitud_por_documento_pct"]["RUT"] = calcular_completitud(rut_data, campos_esperados_por_doc("DOC14"))
+
     else:
         st.info("ℹ️ No cargaste RUT. El Excel saldrá con DOC14 en blanco.")
+        # 📊 Métricas RUT
+        metricas["tiempo_por_documento_s"]["RUT"] = None
+        metricas["completitud_por_documento_pct"]["RUT"] = None
 
     # -------------------------
     # ---- CÉDULA ----
     # -------------------------
     if cc_pdf:
+        t0_cc = time.perf_counter()
         cc_bytes = cc_pdf.read()
 
         with st.spinner("🪪 Cédula: renderizando PDF a imágenes..."):
@@ -911,14 +956,27 @@ if st.button("🚀 Procesar todo"):
         st.success("✅ Cédula lista")
         st.dataframe(pd.DataFrame([cc_data]), use_container_width=True)
 
+        # 📊 Métricas Cédula
+        # Para completitud, añadimos valores fijos del diccionario (los que se rellenan en el Excel)
+        cc_eval = (cc_data or {}).copy()
+        cc_eval["doc_tipo"] = "Documento de identidad (Cédula de ciudadanía) – imagen anverso/reverso"
+        cc_eval.setdefault("doc_pais_emisor", "República de Colombia")
+        cc_eval.setdefault("doc_tipo_documento", "Cédula de ciudadanía")
+        metricas["tiempo_por_documento_s"]["CEDULA"] = round(time.perf_counter() - t0_cc, 3)
+        metricas["completitud_por_documento_pct"]["CEDULA"] = calcular_completitud(cc_eval, campos_esperados_por_doc("DOC12"))
+
     else:
         st.info("ℹ️ No cargaste Cédula. El Excel saldrá con DOC12 en blanco.")
+        # 📊 Métricas Cédula
+        metricas["tiempo_por_documento_s"]["CEDULA"] = None
+        metricas["completitud_por_documento_pct"]["CEDULA"] = None
 
     
     # -------------------------
     # ---- DOC16: CERTIFICACIÓN BANCARIA ----
     # -------------------------
     if doc16_pdf:
+        t0_doc16 = time.perf_counter()
         doc16_bytes = doc16_pdf.read()
 
         with st.spinner("🏦 DOC16: extrayendo texto (PDF/OCR)..."):
@@ -933,8 +991,17 @@ if st.button("🚀 Procesar todo"):
 
         st.success("✅ DOC16 listo")
         st.dataframe(pd.DataFrame([doc16_data]), use_container_width=True)
+
+        # 📊 Métricas DOC16
+        doc16_eval = (doc16_data or {}).copy()
+        doc16_eval["doc_tipo"] = "Certificación bancaria"
+        metricas["tiempo_por_documento_s"]["DOC16"] = round(time.perf_counter() - t0_doc16, 3)
+        metricas["completitud_por_documento_pct"]["DOC16"] = calcular_completitud(doc16_eval, campos_esperados_por_doc("DOC16"))
     else:
         st.info("ℹ️ No cargaste DOC16. El Excel saldrá con DOC16 en blanco.")
+        # 📊 Métricas DOC16
+        metricas["tiempo_por_documento_s"]["DOC16"] = None
+        metricas["completitud_por_documento_pct"]["DOC16"] = None
 
 # -------------------------
     # ✅ Verificación (NO forzar)
@@ -980,6 +1047,47 @@ if st.button("🚀 Procesar todo"):
 
     if rut_data and cc_data:
         logs = validar_rut_vs_cedula(rut_data, cc_data, logs)
+
+
+    # =========================
+    # 📊 Completar métricas: warnings + resumen
+    # =========================
+    metricas["warnings_por_documento"]["RUT"] = contar_warnings(logs, "RUT")
+    metricas["warnings_por_documento"]["CEDULA"] = contar_warnings(logs, "CEDULA")
+    metricas["warnings_por_documento"]["DOC16"] = contar_warnings(logs, "CERTIFICACION_BANCARIA")
+    metricas["warnings_por_documento"]["VALIDACION_CRUZADA"] = contar_warnings(logs, "VALIDACION_CRUZADA")
+
+    st.divider()
+    st.subheader("📊 Métricas mínimas")
+
+    df_metricas = pd.DataFrame([
+        {
+            "Documento": "RUT (DOC14)",
+            "Tiempo_s": metricas["tiempo_por_documento_s"].get("RUT"),
+            "Completitud_%": metricas["completitud_por_documento_pct"].get("RUT"),
+            "Warnings": metricas["warnings_por_documento"].get("RUT"),
+        },
+        {
+            "Documento": "Cédula (DOC12)",
+            "Tiempo_s": metricas["tiempo_por_documento_s"].get("CEDULA"),
+            "Completitud_%": metricas["completitud_por_documento_pct"].get("CEDULA"),
+            "Warnings": metricas["warnings_por_documento"].get("CEDULA"),
+        },
+        {
+            "Documento": "Certificación bancaria (DOC16)",
+            "Tiempo_s": metricas["tiempo_por_documento_s"].get("DOC16"),
+            "Completitud_%": metricas["completitud_por_documento_pct"].get("DOC16"),
+            "Warnings": metricas["warnings_por_documento"].get("DOC16"),
+        },
+        {
+            "Documento": "Validación cruzada",
+            "Tiempo_s": None,
+            "Completitud_%": None,
+            "Warnings": metricas["warnings_por_documento"].get("VALIDACION_CRUZADA"),
+        },
+    ])
+
+    st.dataframe(df_metricas, use_container_width=True)
 
     st.subheader("⚠️ Logs de Validación")
     if logs:
